@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+_orchestrator/runs/
+*.json
+_orchestrator/orchestrator.lock
+.claude/worktrees/

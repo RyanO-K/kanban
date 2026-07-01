@@ -1,0 +1,253 @@
+# .AI-kanban board — agent guide
+
+A lightweight file-based kanban. Each subdirectory of `.AI-kanban/` is one **board**;
+each board holds plain JSON ticket files. There's a small Python server + HTML UI,
+but **agents normally just read and edit the JSON files directly** — no server needed.
+
+## Layout
+
+```
+.AI-kanban/
+  kanban_server.py        # optional read/write API + UI server (port 8745)
+  kanban.html             # the board UI (served at /)
+  _meta.template.json     # template for a new board's _meta.json
+  <board-slug>/           # one directory per board (slug = its id)
+    _meta.json            # board metadata: project, updated, context, openQuestions, outOfScope
+    <id>.json             # one ticket per file (id is numeric: 1.json, 2.json, ...)
+```
+
+A directory is only a board if it contains `_meta.json` (so `__pycache__` etc. are ignored).
+
+## Ticket shape
+
+Key fields on a `<id>.json` ticket:
+
+- `id` (string), `title`, `status`, `detail`
+- `status` is one of: `todo`, `ready`, `in_progress`, `blocked`, `pending`, `completed`
+  (`ready` = all `dependsOn` met/none and queued to start, but not yet picked up)
+- `dependsOn` / `blocks`: arrays of ticket ids
+- `steps`, `files`, `outputs`: plan/checklist arrays
+- `history`: append-only audit log of `status_change` entries (with timestamps)
+- `comments`: `{writer, message, timestamp}` notes
+- `claudeSessionId`: see session tracking below
+
+## How agents interact
+
+**Direct file editing (preferred):** read `_meta.json` for context, read the relevant
+`<id>.json`, and edit JSON in place. When changing `status`, append a `status_change`
+entry to `history` with a UTC timestamp. To add a new ticket, create `<next-id>.json`.
+
+**Via the server (optional):** `python .AI-kanban/kanban_server.py` then use the API:
+
+| Action | Request |
+|---|---|
+| List boards | `GET /api/files` |
+| Load a board (or `__all__`) | `GET /api/board/<slug>` |
+| Move ticket | `PATCH /api/board/<slug>/task/<id>` body `{"column":"in_progress"}` |
+| Create ticket | `POST /api/board/<slug>/task` body `{"title":...,"detail":...}` |
+| Add comment | `POST /api/board/<slug>/task/<id>/comment` body `{"writer":...,"message":...}` |
+| Delete ticket | `DELETE /api/board/<slug>/task/<id>` |
+
+The server auto-appends `history` entries and bumps `_meta.json`'s `updated` date.
+
+### Server bind config
+
+The server's bind host and port are resolved in `main()` with safe defaults
+(loopback `127.0.0.1`, port `8745`). To change them persistently, create
+`.AI-kanban/_orchestrator/server.json`:
+
+```json
+{ "host": "127.0.0.1", "port": 8745 }
+```
+
+Both keys are optional and fall back per-field; a missing or malformed file is
+ignored. Precedence, most explicit first:
+
+- **host:** `KANBAN_HOST` env var → `server.json` → loopback default
+- **port:** `argv[1]` (`python kanban_server.py 9000`) → `KANBAN_PORT` env var →
+  `server.json` → default
+
+Bind to loopback unless you deliberately need LAN exposure — the API exposes
+destructive endpoints (perf kill, server restart, DELETE task).
+
+---
+
+## Conventions
+
+Each subdirectory is a board: `_meta.json` (project metadata) + numbered ticket files (`<id>.json`).
+
+## Skills
+
+Reusable, board-wide skills live under `.AI-kanban/skills/<skill-name>/SKILL.md`. Because
+kanban workers run with `cwd` at the workspace root, a skill placed here is versioned with
+the board **and** discoverable by every worker (a skill buried in a sub-repo's
+`.claude/skills/` would not be). Before doing a task a skill covers, read its `SKILL.md`.
+
+Current skills: none defined yet. Add one under `.AI-kanban/skills/<skill-name>/SKILL.md`
+when a recurring board task is worth codifying.
+
+## Session tracking on tickets
+
+When a Claude session starts actively working on a ticket (typically when moving it to
+`in_progress`), record the session so it can be found later with `claude --resume <id>`:
+
+1. Set a top-level `"claudeSessionId"` field on the ticket JSON to the value of the
+   `CLAUDE_CODE_SESSION_ID` environment variable.
+2. Also include `"sessionId": "<id>"` on the `status_change` history entry for that
+   transition, so the audit trail shows which session made which change.
+
+Example ticket fields:
+
+```json
+{
+  "id": "3",
+  "status": "in_progress",
+  "claudeSessionId": "98a1faf5-71ca-43a6-b7df-6a03b0a4f471",
+  "history": [
+    {
+      "action": "status_change",
+      "from": "todo",
+      "to": "in_progress",
+      "timestamp": "2026-06-15T00:00:00+00:00",
+      "sessionId": "98a1faf5-71ca-43a6-b7df-6a03b0a4f471"
+    }
+  ],
+  "comments": [
+    {
+      "writer": "Claude",
+      "message": "Implemented in kanban.html with three CSS changes: (1) set `html, body` to `height: 100%; overflow: hidden` to lock the page itself, (2) changed `.board` from `align-items: flex-start` to `align-items: stretch` so columns fill the full board height, (3) added `overflow-y: auto` to `.col-body` so each column's card list scrolls independently. Column headers stay fixed above the scroll area. Side panel and modal are unaffected. Added a mobile media query override (`overflow-y: visible` on `.col-body`, `overflow-y: auto` on `.board`) so stacked columns on narrow screens revert to a single board scroll instead.",
+      "timestamp": "2026-06-24T12:00:00+00:00"
+    }
+  ]
+}
+```
+
+`claudeSessionId` reflects the most recent session to work the ticket — overwrite it each
+time a (new or resumed) session picks the ticket back up. The history entries preserve the
+full record of which session did what.
+
+## Live updates on tickets
+
+When working a ticket, the user needs to know the current status live. As you work tickets or are blocked and need input,
+make sure that you are moving hte ticket appropriately. When finished, move the ticket to Completed and make sure to leave
+a comment summarizing your work in <200 words.
+Do NOT leave notes in the history.
+
+## Git workflow
+
+Every ticket that touches code should be worked in an isolated git branch and committed when done.
+
+**1. Create a branch before making any code changes.**
+Name it after the ticket: `<id>-Feature-Name` (e.g. `25-Worktree-Guidance`). Use title-case words separated by hyphens, derived from the ticket title.
+
+```bash
+git checkout -b <id>-Feature-Name
+```
+
+**2. Use a worktree only if this project enables it.**
+Worktrees are a **per-project setting**: the board's `_meta.json` carries a `useWorktrees`
+boolean (toggled from the Project Settings page). Read it before choosing how to isolate:
+
+- **`useWorktrees: true`** — work your code changes in a git worktree. If the `EnterWorktree`
+  tool is available, prefer it (it handles placement and cleanup automatically); otherwise
+  `git worktree add .claude/worktrees/ticket-<id> -b <id>-Feature-Name` from the project's
+  repo root (the `directory` field on `_meta.json`), verifying `.claude/worktrees/` is in
+  `.gitignore` first.
+- **`useWorktrees: false` or unset** — do **not** create a worktree. Work in place on the
+  branch from step 1 and commit there.
+
+**Board path anchoring.** A worktree moves your working directory away from the workspace
+root, so a cwd-relative `.AI-kanban/...` path no longer resolves. Always read and edit your
+ticket JSON, `_meta.json`, and any `.AI-kanban/` skills via their **absolute** paths (the
+dispatch prompt gives your ticket file as an absolute path) — never a relative `.AI-kanban/...`.
+
+**Before committing, honor the board's commit requirements.**
+A board may set a free-text `commitRequirements` field in its `_meta.json` (editable
+from the UI's **Board** settings button). It states, in natural language, what must
+hold before you commit — e.g. "all tests must pass before committing." Read it from the
+board's `_meta.json` and satisfy it before running `git commit`. If you cannot satisfy
+it, do not commit — escalate (move the ticket to `blocked` with an `orchestrator.question`).
+
+When a `commitRequirements` field is set, also record the outcome on the ticket so the
+orchestrator's auto-commit (below) can gate on it: write a top-level `commitGate` object
+`{ "requirementsMet": <bool>, "summary": "<what you ran/verified>" }`. The orchestrator
+will NOT commit on an unverified gate (no `commitGate`, or `requirementsMet` false).
+
+**3. Commit your changes when done.**
+Write a short, descriptive commit message referencing the ticket id:
+
+```bash
+git add <changed files>
+git commit -m "ticket #<id>: <what changed>"
+```
+
+**4. Push the branch.**
+
+```bash
+git push -u origin <id>-Feature-Name
+```
+
+**Exception:** All `.AI-kanban/` files — ticket JSON, `CLAUDE.md`, config profiles, orchestrator state, skills, and any other file under `.AI-kanban/` — are always committed directly to `master`. Never create a branch for kanban-only changes. Only non-kanban source files require a branch.
+
+**Auto-commit on completion.** When the orchestrator reaps a ticket as `completed`, it
+inspects the working-tree changes: if they are **entirely** under `.AI-kanban/` (kanban-only
+work), it auto-commits them to the current branch (master) with a `ticket #<id>: <title>`
+message and the agent's `commitGate.summary` as the body — gated by the board's
+`commitRequirements` (see above). If any changed file is outside `.AI-kanban/`, it instead
+publishes the work to the isolated `ticket/<id>-<slug>` branch as before. Auto-commit is
+best-effort (a missing git / non-repo tree never blocks completion); the outcome is always
+recorded in a ticket comment.
+
+> **Which repo gets the commit.** The workspace root (the parent of `.AI-kanban`) is **not** a
+> single git repo — `.AI-kanban` and each sibling top-level directory (a checked-out Salesforce
+> repo, etc.) are independent repos. So the orchestrator does not run git at the root; it
+> `cd`s into the repo the changed files actually live in and commits from there
+> (`discover_changed_paths` walks each sub-repo, prefixing its `git status --porcelain` paths
+> with the repo dir name; `repo_dir_for_paths` then maps a change set back to its repo —
+> `.AI-kanban/…` → the `.AI-kanban` repo, `subrepo/…` → that sub-repo). A change set spanning
+> two different sub-repos can't pick one and falls back to the (no-op) root.
+
+## Orchestrator
+
+`orchestrator.py` is a headless loop that works the board autonomously. Each ~60s tick it
+reaps finished/killed/stalled sub-agents, then (if enabled) asks Opus to triage eligible
+tickets and dispatches headless `claude -p` sub-agents up to the concurrency cap. Decision
+logic lives in `orchestrator_core.py` (unit-tested); `orchestrator.py` is the runtime that
+spawns real processes.
+
+Run it: `python .AI-kanban/orchestrator.py` (alongside `kanban_server.py`). You can also open a
+normal `claude` CLI in this workspace to talk to it — it reads the same files and the same
+triage prompt (`orchestrator_triage_prompt.md`).
+
+- **Profiles** live in `.AI-kanban/config/<name>.json` (`whenToUse`, `model`, `allowedTools`,
+  `systemPrompt`). Opus picks the best-fit profile by `whenToUse` and may override the model
+  per ticket. `config/` is never a board (no `_meta.json`). Manage them in the **Profiles** tab.
+- **Control state** is `.AI-kanban/_orchestrator/state.json` (`enabled`, `concurrencyCap`,
+  `stopAllRequested`), toggled from the **Orchestrator** tab. `enabled:false` pauses new
+  dispatch (reaping still runs); "Stop all" kills everything in flight.
+- **Activity feed** is `.AI-kanban/_orchestrator/activity.json`; per-run sub-agent logs are under
+  `_orchestrator/runs/`. Both `config/` and `_orchestrator/` are excluded from board scans.
+- **In-flight marker** on a ticket: an `orchestrator` block (`state`, `profile`, `model`,
+  `pid`, `dispatchedAt`, `killRequested`, `logFile`). Field ownership: the loop writes only the
+  `orchestrator` block + `status` + appends `history`; sub-agents write only `comments` and
+  `question`/result fields.
+- **Eligibility:** a ticket is dispatchable when its `dependsOn` are all `completed` (or none)
+  and it is not in-flight/`completed`/`in_progress`. A `blocked` ticket whose
+  `orchestrator.question.answer` is set re-dispatches automatically.
+- **Human-attention questions:** a sub-agent that needs input sets `status:"blocked"` and
+  writes `orchestrator.question` (`type` ∈ `input`|`choice`; every answer also carries free-text
+  `notes`, answer shape `{value, notes}`). Answer it in the Orchestrator tab; the ticket
+  auto re-dispatches next tick.
+- **Kill:** Orchestrator-tab kill buttons hit `POST /api/orchestrator/kill/<board>/<id>`
+  (instant if the PID is alive, else queued via `killRequested`). The loop also reaps stalled
+  agents on its own (gated by a productivity check).
+
+## Performance tab
+
+The **Performance** tab (`perf_monitor.py` + `GET /api/performance`) discovers every
+`claude.exe` session on the PC — including orphaned/external ones the orchestrator never
+spawned — rolls up each session's subprocess-tree CPU/memory, graphs usage over a rolling
+~5-minute window, and can kill a session's whole tree (`POST /api/performance/kill/<pid>`).
+
+> The Performance tab needs `psutil` (`pip install psutil`). Without it the tab shows an
+> install hint and the rest of the server works normally.
