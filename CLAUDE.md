@@ -1,13 +1,13 @@
-# .AI-kanban board — agent guide
+# .kanban board — agent guide
 
-A lightweight file-based kanban. Each subdirectory of `.AI-kanban/` is one **board**;
+A lightweight file-based kanban. Each subdirectory of `.kanban/` is one **board**;
 each board holds plain JSON ticket files. There's a small Python server + HTML UI,
 but **agents normally just read and edit the JSON files directly** — no server needed.
 
 ## Layout
 
 ```
-.AI-kanban/
+.kanban/
   kanban_server.py        # optional read/write API + UI server (port 8745)
   kanban.html             # the board UI (served at /)
   _meta.template.json     # template for a new board's _meta.json
@@ -37,7 +37,7 @@ Key fields on a `<id>.json` ticket:
 `<id>.json`, and edit JSON in place. When changing `status`, append a `status_change`
 entry to `history` with a UTC timestamp. To add a new ticket, create `<next-id>.json`.
 
-**Via the server (optional):** `python .AI-kanban/kanban_server.py` then use the API:
+**Via the server (optional):** `python .kanban/kanban_server.py` then use the API:
 
 | Action | Request |
 |---|---|
@@ -54,7 +54,7 @@ The server auto-appends `history` entries and bumps `_meta.json`'s `updated` dat
 
 The server's bind host and port are resolved in `main()` with safe defaults
 (loopback `127.0.0.1`, port `8745`). To change them persistently, create
-`.AI-kanban/_orchestrator/server.json`:
+`.kanban/_orchestrator/server.json`:
 
 ```json
 { "host": "127.0.0.1", "port": 8745 }
@@ -78,13 +78,16 @@ Each subdirectory is a board: `_meta.json` (project metadata) + numbered ticket 
 
 ## Skills
 
-Reusable, board-wide skills live under `.AI-kanban/skills/<skill-name>/SKILL.md`. Because
+Reusable, board-wide skills live under `.kanban/skills/<skill-name>/SKILL.md`. Because
 kanban workers run with `cwd` at the workspace root, a skill placed here is versioned with
 the board **and** discoverable by every worker (a skill buried in a sub-repo's
 `.claude/skills/` would not be). Before doing a task a skill covers, read its `SKILL.md`.
 
-Current skills: none defined yet. Add one under `.AI-kanban/skills/<skill-name>/SKILL.md`
-when a recurring board task is worth codifying.
+Current skills:
+
+- **`create-promotion-prs`** — raise `barnumHardis` promotion PRs from the CLI by
+  dispatching `manual-create-promotion-prs.yml` via `gh workflow run` (instead of opening a
+  throwaway PR into `partial`). See `.kanban/skills/create-promotion-prs/SKILL.md`.
 
 ## Session tracking on tickets
 
@@ -135,31 +138,26 @@ Do NOT leave notes in the history.
 
 ## Git workflow
 
-Every ticket that touches code should be worked in an isolated git branch and committed when done.
+**Check `useWorktrees` in the board's `_meta.json` first** — it determines whether you branch, use a worktree, or commit directly to the main branch.
 
-**1. Create a branch before making any code changes.**
-Name it after the ticket: `<id>-Feature-Name` (e.g. `25-Worktree-Guidance`). Use title-case words separated by hyphens, derived from the ticket title.
-
-```bash
-git checkout -b <id>-Feature-Name
-```
-
-**2. Use a worktree only if this project enables it.**
+**Use a worktree only if this project enables it.**
 Worktrees are a **per-project setting**: the board's `_meta.json` carries a `useWorktrees`
 boolean (toggled from the Project Settings page). Read it before choosing how to isolate:
 
-- **`useWorktrees: true`** — work your code changes in a git worktree. If the `EnterWorktree`
+- **`useWorktrees: true`** — create a branch, then work your code changes in a git worktree.
+  Name the branch `<id>-Feature-Name` (e.g. `25-Worktree-Guidance`). If the `EnterWorktree`
   tool is available, prefer it (it handles placement and cleanup automatically); otherwise
   `git worktree add .claude/worktrees/ticket-<id> -b <id>-Feature-Name` from the project's
   repo root (the `directory` field on `_meta.json`), verifying `.claude/worktrees/` is in
   `.gitignore` first.
-- **`useWorktrees: false` or unset** — do **not** create a worktree. Work in place on the
-  branch from step 1 and commit there.
+- **`useWorktrees: false` or unset** — do **not** create a worktree and do **not** create a
+  new branch. Work directly on the default branch (master/main/production) in the repo root
+  directory (`directory` in `_meta.json`). Commit your changes there when done.
 
 **Board path anchoring.** A worktree moves your working directory away from the workspace
-root, so a cwd-relative `.AI-kanban/...` path no longer resolves. Always read and edit your
-ticket JSON, `_meta.json`, and any `.AI-kanban/` skills via their **absolute** paths (the
-dispatch prompt gives your ticket file as an absolute path) — never a relative `.AI-kanban/...`.
+root, so a cwd-relative `.kanban/...` path no longer resolves. Always read and edit your
+ticket JSON, `_meta.json`, and any `.kanban/` skills via their **absolute** paths (the
+dispatch prompt gives your ticket file as an absolute path) — never a relative `.kanban/...`.
 
 **Before committing, honor the board's commit requirements.**
 A board may set a free-text `commitRequirements` field in its `_meta.json` (editable
@@ -187,24 +185,24 @@ git commit -m "ticket #<id>: <what changed>"
 git push -u origin <id>-Feature-Name
 ```
 
-**Exception:** All `.AI-kanban/` files — ticket JSON, `CLAUDE.md`, config profiles, orchestrator state, skills, and any other file under `.AI-kanban/` — are always committed directly to `master`. Never create a branch for kanban-only changes. Only non-kanban source files require a branch.
+**Exception:** All `.kanban/` files — ticket JSON, `CLAUDE.md`, config profiles, orchestrator state, skills, and any other file under `.kanban/` — are always committed directly to `master`. Never create a branch for kanban-only changes. Only non-kanban source files require a branch.
 
 **Auto-commit on completion.** When the orchestrator reaps a ticket as `completed`, it
-inspects the working-tree changes: if they are **entirely** under `.AI-kanban/` (kanban-only
+inspects the working-tree changes: if they are **entirely** under `.kanban/` (kanban-only
 work), it auto-commits them to the current branch (master) with a `ticket #<id>: <title>`
 message and the agent's `commitGate.summary` as the body — gated by the board's
-`commitRequirements` (see above). If any changed file is outside `.AI-kanban/`, it instead
+`commitRequirements` (see above). If any changed file is outside `.kanban/`, it instead
 publishes the work to the isolated `ticket/<id>-<slug>` branch as before. Auto-commit is
 best-effort (a missing git / non-repo tree never blocks completion); the outcome is always
 recorded in a ticket comment.
 
-> **Which repo gets the commit.** The workspace root (the parent of `.AI-kanban`) is **not** a
-> single git repo — `.AI-kanban` and each sibling top-level directory (a checked-out Salesforce
+> **Which repo gets the commit.** The workspace root (the parent of `.kanban`) is **not** a
+> single git repo — `.kanban` and each sibling top-level directory (a checked-out Salesforce
 > repo, etc.) are independent repos. So the orchestrator does not run git at the root; it
 > `cd`s into the repo the changed files actually live in and commits from there
 > (`discover_changed_paths` walks each sub-repo, prefixing its `git status --porcelain` paths
 > with the repo dir name; `repo_dir_for_paths` then maps a change set back to its repo —
-> `.AI-kanban/…` → the `.AI-kanban` repo, `subrepo/…` → that sub-repo). A change set spanning
+> `.kanban/…` → the `.kanban` repo, `barnumHardis2/…` → that sub-repo). A change set spanning
 > two different sub-repos can't pick one and falls back to the (no-op) root.
 
 ## Orchestrator
@@ -215,17 +213,17 @@ tickets and dispatches headless `claude -p` sub-agents up to the concurrency cap
 logic lives in `orchestrator_core.py` (unit-tested); `orchestrator.py` is the runtime that
 spawns real processes.
 
-Run it: `python .AI-kanban/orchestrator.py` (alongside `kanban_server.py`). You can also open a
+Run it: `python .kanban/orchestrator.py` (alongside `kanban_server.py`). You can also open a
 normal `claude` CLI in this workspace to talk to it — it reads the same files and the same
 triage prompt (`orchestrator_triage_prompt.md`).
 
-- **Profiles** live in `.AI-kanban/config/<name>.json` (`whenToUse`, `model`, `allowedTools`,
+- **Profiles** live in `.kanban/config/<name>.json` (`whenToUse`, `model`, `allowedTools`,
   `systemPrompt`). Opus picks the best-fit profile by `whenToUse` and may override the model
   per ticket. `config/` is never a board (no `_meta.json`). Manage them in the **Profiles** tab.
-- **Control state** is `.AI-kanban/_orchestrator/state.json` (`enabled`, `concurrencyCap`,
+- **Control state** is `.kanban/_orchestrator/state.json` (`enabled`, `concurrencyCap`,
   `stopAllRequested`), toggled from the **Orchestrator** tab. `enabled:false` pauses new
   dispatch (reaping still runs); "Stop all" kills everything in flight.
-- **Activity feed** is `.AI-kanban/_orchestrator/activity.json`; per-run sub-agent logs are under
+- **Activity feed** is `.kanban/_orchestrator/activity.json`; per-run sub-agent logs are under
   `_orchestrator/runs/`. Both `config/` and `_orchestrator/` are excluded from board scans.
 - **In-flight marker** on a ticket: an `orchestrator` block (`state`, `profile`, `model`,
   `pid`, `dispatchedAt`, `killRequested`, `logFile`). Field ownership: the loop writes only the

@@ -20,7 +20,7 @@ def docs(kanban, monkeypatch):
     os.makedirs(plans)
     # A spec whose header points at board "demo", ticket 1.
     with open(os.path.join(specs, "feature.md"), "w", encoding="utf-8") as f:
-        f.write("# Feature Design\n\n**Ticket:** `.AI-kanban/demo/1.json`\n\nBody.\n")
+        f.write("# Feature Design\n\n**Ticket:** `.kanban/demo/1.json`\n\nBody.\n")
     # A plan with no ticket ref — must NOT be auto-attached to anything.
     with open(os.path.join(plans, "loose.md"), "w", encoding="utf-8") as f:
         f.write("# Loose Plan\n\nNo ticket reference here.\n")
@@ -52,8 +52,8 @@ def test_attach_specs_auto(docs):
 
 def test_attach_specs_explicit_ref_merges_and_dedupes(docs):
     idx = ks.build_spec_index()
-    # Explicit ref to the same doc (with .AI-kanban/ prefix) must not duplicate.
-    task = {"id": "1", "spec": ".AI-kanban/docs/specs/feature.md"}
+    # Explicit ref to the same doc (with .kanban/ prefix) must not duplicate.
+    task = {"id": "1", "spec": ".kanban/docs/specs/feature.md"}
     ks.attach_specs(task, "demo", idx)
     assert len(task["_specs"]) == 1
 

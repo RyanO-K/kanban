@@ -23,17 +23,25 @@ class FakeProc:
 
 
 def test_classify_headless_extracts_board_and_ticket():
-    cmd = ["claude.EXE", "-p", "Ticket #10 ...\nTicket file: C:\\x\\.AI-kanban\\kanban-dev\\10.json"]
-    kind, board, ticket = pm.classify_cmdline(cmd)
+    cmd = ["claude.EXE", "-p", "Ticket #10 ...\nTicket file: C:\\x\\.kanban\\kanban-dev\\10.json"]
+    kind, board, ticket, model = pm.classify_cmdline(cmd)
     assert kind == "headless"
     assert board == "kanban-dev"
     assert ticket == "10"
+    assert model is None
+
+
+def test_classify_headless_extracts_model():
+    cmd = ["claude.EXE", "-p", "Ticket #10", "--model", "claude-opus-4-8"]
+    kind, board, ticket, model = pm.classify_cmdline(cmd)
+    assert kind == "headless"
+    assert model == "claude-opus-4-8"
 
 
 def test_classify_interactive_has_no_ticket():
-    kind, board, ticket = pm.classify_cmdline(["claude.exe"])
+    kind, board, ticket, model = pm.classify_cmdline(["claude.exe"])
     assert kind == "interactive"
-    assert board is None and ticket is None
+    assert board is None and ticket is None and model is None
 
 
 def test_discover_finds_only_claude_and_rolls_up_children():

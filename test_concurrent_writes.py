@@ -90,7 +90,7 @@ def _inflight(path, pid=123):
     t["orchestrator"] = {
         "state": "dispatched", "pid": pid, "killRequested": False,
         "dispatchedAt": oc.now_iso(),
-        "logFile": ".AI-kanban/_orchestrator/runs/x.log",
+        "logFile": ".kanban/_orchestrator/runs/x.log",
     }
     _write(path, t)
 

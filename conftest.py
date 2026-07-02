@@ -4,15 +4,15 @@ import sys
 
 import pytest
 
-# Make the .AI-kanban dir importable (orchestrator_core.py lives there).
-KANBAN_SRC = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Make the .kanban dir importable (orchestrator_core.py lives there).
+KANBAN_SRC = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, KANBAN_SRC)
 
 
 @pytest.fixture
 def kanban(tmp_path):
-    """A temp .AI-kanban tree with one board and two tickets."""
-    root = tmp_path / ".AI-kanban"
+    """A temp .kanban tree with one board and two tickets."""
+    root = tmp_path / ".kanban"
     board = root / "demo"
     board.mkdir(parents=True)
     (board / "_meta.json").write_text(json.dumps({"project": "Demo"}), encoding="utf-8")

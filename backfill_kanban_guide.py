@@ -9,7 +9,7 @@ is never overwritten, so re-running never causes drift). New tickets created via
 the server get the field automatically; this script is only for ones that predate
 that change or were created by hand.
 
-Run from anywhere:  python .AI-kanban/backfill_kanban_guide.py
+Run from anywhere:  python .kanban/backfill_kanban_guide.py
 """
 
 import json

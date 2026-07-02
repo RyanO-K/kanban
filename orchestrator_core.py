@@ -27,6 +27,149 @@ DEFAULT_STATE = {"enabled": False, "concurrencyCap": 3,
                  "autoCommit": True, "autoPush": True}
 
 
+# --- Stream-json log parsing (shared with kanban_server) --------------------
+#
+# Moved here from kanban_server so orchestrator.py can call parse_log_turns
+# when saving a completed ticket's log without creating a circular import.
+
+_TOOL_RESULT_PREVIEW = 6000
+
+
+def _tool_summary(name, tool_input):
+    """A short, human-readable note of what a tool_use block is doing."""
+    if not isinstance(tool_input, dict):
+        return ""
+    inp = tool_input
+    if name in ("Read", "Write", "NotebookEdit") and inp.get("file_path"):
+        return str(inp["file_path"])
+    if name == "Edit" and inp.get("file_path"):
+        return str(inp["file_path"])
+    if name in ("Bash", "PowerShell") and inp.get("command"):
+        return str(inp["command"])
+    if name == "Glob" and inp.get("pattern"):
+        return str(inp["pattern"])
+    if name == "Grep" and inp.get("pattern"):
+        return str(inp["pattern"])
+    if name == "Skill" and inp.get("skill"):
+        return str(inp["skill"])
+    if name in ("Task", "Agent") and inp.get("description"):
+        return str(inp["description"])
+    for v in inp.values():
+        if isinstance(v, str) and v:
+            return v
+    return ""
+
+
+def _result_preview(content):
+    """Flatten a tool_result `content` into a short text preview."""
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                parts.append(str(block.get("text", "")))
+            elif isinstance(block, str):
+                parts.append(block)
+        text = "\n".join(parts)
+    else:
+        text = ""
+    text = text.strip()
+    if len(text) > _TOOL_RESULT_PREVIEW:
+        text = text[:_TOOL_RESULT_PREVIEW] + "…"
+    return text
+
+
+def _nearest_line_ts(line_ts, idx):
+    """The timestamp of the nearest timestamped line at/after `idx`, else the
+    nearest one before it, else None. `line_ts` is [(line_idx, ts), ...] sorted."""
+    preceding = None
+    for i, ts in line_ts:
+        if i >= idx:
+            return ts
+        preceding = ts
+    return preceding
+
+
+def parse_log_turns(text, n=20):
+    """Parse stream-json log *text* into the last *n* compact turn objects.
+
+    Pure (no I/O) so it is unit-testable. Each line is one JSON object; only
+    `assistant` lines become turns. A turn is `{seq, role, text, tools}`:
+      - text:  concatenated text/thinking blocks (the agent's thoughts).
+      - tools: a chip per tool_use: `{name, summary, result}`.
+      - timestamp: the line's own top-level timestamp when present; the CLI
+        stamps only `user`/tool_result lines, so assistant turns borrow the
+        nearest following (else preceding) timestamped line's value.
+
+    Tool results are folded into the chip of the tool_use they answer (matched
+    by tool_use_id). Housekeeping lines and empty turns are dropped; malformed /
+    non-JSON lines are skipped.
+    """
+    lines = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            lines.append(json.loads(line))
+        except (ValueError, TypeError):
+            continue
+
+    results_by_id = {}
+    line_ts = []  # (line_idx, timestamp) for every line that carries one
+    for i, obj in enumerate(lines):
+        if isinstance(obj, dict) and obj.get("timestamp"):
+            line_ts.append((i, obj["timestamp"]))
+        content = (obj.get("message") or {}).get("content") if isinstance(obj, dict) else None
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_result":
+                tid = block.get("tool_use_id")
+                if tid:
+                    results_by_id[tid] = _result_preview(block.get("content"))
+
+    turns = []
+    for idx, obj in enumerate(lines):
+        if not isinstance(obj, dict) or obj.get("type") != "assistant":
+            continue
+        message = obj.get("message") or {}
+        content = message.get("content")
+        text_parts = []
+        tools = []
+        if isinstance(content, str):
+            text_parts.append(content)
+        elif isinstance(content, list):
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                bt = block.get("type")
+                if bt == "text":
+                    text_parts.append(str(block.get("text", "")))
+                elif bt == "thinking":
+                    text_parts.append(str(block.get("thinking", "")))
+                elif bt == "tool_use":
+                    tools.append({
+                        "name": str(block.get("name", "tool")),
+                        "summary": _tool_summary(block.get("name"), block.get("input")),
+                        "result": results_by_id.get(block.get("id"), ""),
+                    })
+        turn_text = "\n".join(p for p in text_parts if p).strip()
+        if not turn_text and not tools:
+            continue
+        turn = {"role": "assistant", "text": turn_text, "tools": tools}
+        ts = obj.get("timestamp") or _nearest_line_ts(line_ts, idx)
+        if ts:
+            turn["timestamp"] = ts
+        turns.append(turn)
+    if n and len(turns) > n:
+        turns = turns[-n:]
+    for i, t in enumerate(turns):
+        t["seq"] = i
+    return turns
+
+
 def now_iso():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -461,6 +604,18 @@ def _has_answered_question(task):
 _DONE_STATES = ("completed", "done")
 
 
+def is_done(task):
+    """True if the ticket has reached a terminal/finished status.
+
+    A finished ticket is terminal: the reap loop must NOT re-reap it even if a
+    stale `dispatched` marker reappears (a re-dispatch/adoption write race can
+    re-add the marker after `clear_marker`). Without this guard the adopted-agent
+    path re-classifies it as `completed` on every tick and re-runs the publish
+    side-effects (ticket #48).
+    """
+    return task.get("status") in _DONE_STATES
+
+
 def _dep_met_fn(tasks):
     """Build a per-board dependency-satisfaction predicate over `tasks`.
 
@@ -515,18 +670,24 @@ def eligible_tickets(tasks):
     Fresh work is dispatched from `ready` (the promotion gate already cleared
     each ticket's dependencies — see `promotable_tickets`). A `blocked` ticket
     whose question has been answered re-dispatches regardless of status.
+
+    Ready tickets are returned sorted by their `order` field ascending (lower =
+    higher priority) so backfill_dispatch picks the top of the Ready list first.
+    Tickets without an `order` field sort after those that have one.
     """
-    out = []
+    ready = []
+    other = []
     for t in tasks:
         if is_in_flight(t):
             continue
         # A blocked ticket with an answered question re-dispatches.
         if t.get("status") == "blocked" and _has_answered_question(t):
-            out.append(t)
+            other.append(t)
             continue
         if t.get("status") == "ready":
-            out.append(t)
-    return out
+            ready.append(t)
+    ready.sort(key=lambda t: (t["order"] if t.get("order") is not None else float("inf")))
+    return ready + other
 
 
 def validate_triage(response, profile_names, eligible_ids):

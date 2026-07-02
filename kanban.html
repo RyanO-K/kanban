@@ -37,7 +37,7 @@
   }
   /* topbar */
   .topbar {
-    display: flex; align-items: center; gap: 14px;
+    display: flex; align-items: center; flex-wrap: wrap; gap: 10px 14px;
     padding: 10px 18px; background: var(--surface);
     border-bottom: 1px solid var(--surface-alt);
     position: sticky; top: 0; z-index: 100;
@@ -52,30 +52,26 @@
   .topbar select:focus { outline: 2px solid #3b82f6; }
   .status-indicator {
     margin-left: auto; font-size: 12px;
-    display: flex; align-items: center; gap: 6px; white-space: nowrap;
+    display: flex; align-items: center; white-space: nowrap;
   }
+  /* Ticket #65: one compact status pill replaces the old server/orch/dot/last-updated
+     cluster. The dot color is the status (green healthy / amber degraded / red offline);
+     all detail (offline reason, orch paused/stopped, last-updated) lives in the title. */
+  .status-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 3px 9px 3px 8px; border-radius: 999px;
+    background: var(--bg); border: 1px solid var(--surface-alt);
+    font-size: 11px; font-weight: 600; color: var(--text-muted);
+    cursor: default; transition: border-color var(--dur-fast) var(--ease-out);
+  }
+  .status-pill:focus-visible { outline: 2px solid #3b82f6; outline-offset: 1px; }
   .dot { width:8px;height:8px;border-radius:50%;background:#22c55e;animation:pulse 2s ease-in-out infinite; }
-  .dot.error { background:#ef4444;animation:none; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
-  .last-updated { font-size: 11px; color: var(--text-muted); }
-  .server-down-badge {
-    display: none; align-items: center; gap: 5px;
-    background: #450a0a; border: 1px solid #ef4444;
-    color: #fca5a5; font-size: 11px; font-weight: 600;
-    padding: 3px 8px; border-radius: 5px;
-    cursor: default;
-  }
-  .server-down-badge.visible { display: flex; }
-  .server-down-badge .badge-icon { font-size: 12px; }
-  .orch-status-badge {
-    display: none; align-items: center; gap: 5px;
-    font-size: 11px; font-weight: 600;
-    padding: 3px 8px; border-radius: 5px;
-    cursor: default;
-  }
-  .orch-status-badge.visible { display: flex; }
-  .orch-status-badge.paused { background:#1c1917; border:1px solid #78716c; color:#a8a29e; }
-  .orch-status-badge.stopped { background:#450a0a; border:1px solid #ef4444; color:#fca5a5; }
+  /* healthy = green (default dot), degraded = amber, offline = red. */
+  .status-pill.degraded { border-color: rgba(120,113,108,.6); color: #d6bf9a; }
+  .status-pill.degraded .dot { background:#f59e0b; animation:none; }
+  .status-pill.offline { border-color: rgba(239,68,68,.6); color: #fca5a5; }
+  .status-pill.offline .dot { background:#ef4444; animation:none; }
   .add-btn {
     background:#3b82f6;color:#fff;border:none;border-radius:6px;
     padding:5px 12px;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;
@@ -97,28 +93,25 @@
   <h1>&#x1F4CB; Task Board</h1>
   <div class="view-tabs">
     <button class="view-tab active" data-view="boards">Boards</button>
-    <button class="view-tab" data-view="profiles">Settings</button>
-    <button class="view-tab" data-view="orchestrator">Orchestrator</button>
+    <button class="view-tab" data-view="setup">Setup</button>
     <button class="view-tab" data-view="performance">Performance</button>
   </div>
   <select id="boardSelect"><option value="">Loading&#x2026;</option></select>
   <button class="add-btn" id="boardSettingsBtn" style="background:var(--surface-alt);color:var(--text);" title="Edit this project's settings — directory, tests required, description and more">&#x2699; Settings</button>
+  <button class="add-btn" id="nudgeBoardBtn" style="background:#3b82f6;" title="Immediately run one orchestrator tick — reap finished agents and dispatch ready tickets">Nudge</button>
   <button class="add-btn" id="markAllReadBtn" style="display:none;background:var(--surface-alt);color:var(--text);" title="Mark all unread tickets as read">&#x2713; Mark all read</button>
   <button class="add-btn" id="addBtn">+ New Task</button>
   <div class="status-indicator">
-    <div class="server-down-badge" id="serverDownBadge" title="Cannot reach the kanban server. Is kanban_server.py running?">
-      <span class="badge-icon">&#x26A0;</span>Server offline
+    <div class="status-pill" id="statusPill" title="Connecting&#x2026;" tabindex="0">
+      <span class="dot" id="dot"></span>
+      <span id="statusText">connecting&#x2026;</span>
     </div>
-    <div class="orch-status-badge" id="orchStatusBadge"></div>
-    <div class="dot" id="dot"></div>
-    <span id="statusText">connecting&#x2026;</span>
-    <span class="last-updated" id="lastUpdated"></span>
   </div>
 </div>
 
 <style>
   /* board layout */
-  .main-wrap { display: flex; height: calc(100vh - 52px); }
+  .main-wrap { display: flex; height: calc(100vh - var(--topbar-h, 52px)); }
   .board {
     flex: 1; display: flex; gap: 10px;
     padding: 14px 16px; overflow-x: auto; align-items: stretch;
@@ -126,7 +119,7 @@
   }
   .board.panel-open { margin-right: var(--panel-w); }
   .column {
-    flex:1;min-width:200px;max-width:340px;background:var(--surface);
+    flex:1;min-width:200px;background:var(--surface);
     border-radius:8px;display:flex;flex-direction:column;
     transition:background var(--dur-fast) var(--ease-out),outline-color var(--dur-fast) var(--ease-out);
     outline:2px solid transparent;outline-offset:-2px;
@@ -221,13 +214,19 @@
   .card-title { font-weight:600;margin-bottom:2px;display:flex;align-items:baseline;gap:5px;line-height:1.35; }
   .card-id { color:var(--text-muted);font-size:10px;font-weight:400;flex-shrink:0; }
   .card-project { color:#60a5fa;font-size:10px;font-weight:600;margin-bottom:3px;text-transform:uppercase;letter-spacing:.3px; }
-  .card-detail { color:var(--text-muted);font-size:11px;line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden; }
+  .card-detail { color:var(--text-muted);font-size:11px;line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;line-clamp:2;-webkit-box-orient:vertical;overflow:hidden; }
   .card-footer { display:flex;align-items:center;justify-content:space-between;margin-top:4px; }
   .card-comments-badge { font-size:10px;color:#64748b; }
   .card-status-badge { font-size:9px;padding:1px 5px;border-radius:3px;background:var(--surface-alt);color:var(--text-muted); }
   .card-footer-right { display:flex;align-items:center;gap:6px; }
   .card-copy-path { background:none;border:none;padding:0;font-size:11px;line-height:1;cursor:pointer;opacity:.45;transition:opacity var(--dur-fast) var(--ease-out); }
   .card-copy-path:hover { opacity:1; }
+  .card-order-btns { display:flex;flex-direction:column;gap:1px;position:absolute;right:4px;top:50%;transform:translateY(-50%);opacity:0;transition:opacity var(--dur-fast) var(--ease-out); }
+  .card:hover .card-order-btns { opacity:1; }
+  .card-order-btn { background:var(--surface-alt);border:none;border-radius:3px;color:var(--text-muted);font-size:9px;line-height:1;padding:2px 4px;cursor:pointer;transition:background var(--dur-fast) var(--ease-out),color var(--dur-fast) var(--ease-out); }
+  .card-order-btn:hover:not(:disabled) { background:#8b5cf6;color:#fff; }
+  .card-order-btn:disabled { opacity:.25;cursor:default;background:var(--surface-alt);color:var(--text-muted); }
+  .card { position:relative; }
   .card.done .card-title { text-decoration:line-through;opacity:.55; }
   .card.done .card-detail { opacity:.45; }
   .card.unreviewed { animation: agentGlow 1.8s ease-in-out infinite; }
@@ -236,7 +235,7 @@
     50%      { box-shadow: 0 0 0 2px #60a5fa, 0 0 14px 4px rgba(96,165,250,.55); }
   }
   /* Ticket #65: board-load skeleton */
-  .skeleton-col { flex:1;min-width:200px;max-width:340px;background:var(--surface);border-radius:8px;display:flex;flex-direction:column; }
+  .skeleton-col { flex:1;min-width:200px;background:var(--surface);border-radius:8px;display:flex;flex-direction:column; }
   .skeleton-hdr { height:38px;background:var(--surface-alt);border-radius:8px 8px 0 0; }
   .skeleton-body { padding:7px;flex:1;display:flex;flex-direction:column;gap:5px; }
   .skeleton-card { background:var(--bg);border-left:3px solid var(--surface-alt);border-radius:4px; }
@@ -250,7 +249,7 @@
 <style>
   /* side panel */
   .side-panel {
-    position:fixed;top:52px;right:0;bottom:0;width:var(--panel-w);
+    position:fixed;top:var(--topbar-h, 52px);right:0;bottom:0;width:var(--panel-w);
     background:var(--surface);border-left:1px solid var(--surface-alt);
     transform:translateX(100%);transition:transform var(--dur-med) var(--ease-out);
     z-index:90;display:flex;flex-direction:column;overflow:hidden;
@@ -300,6 +299,43 @@
   .sp-comment-form button:hover { background:#2563eb; }
   .sp-history-item { font-size:11px;color:var(--text-muted);margin-bottom:6px;padding-left:12px;border-left:2px solid var(--surface-alt); }
   .sp-history-time { font-size:10px;color:#64748b; }
+  /* live logs section */
+  .sp-log-toggle { display:flex;align-items:center;gap:8px;background:#1e293b;color:#cbd5e1;border:1px solid #334155;border-radius:5px;font-size:12px;font-weight:600;padding:7px 10px;cursor:pointer;width:100%;text-align:left; }
+  .sp-log-toggle:hover { background:#334155; }
+  .sp-log-toggle .sp-log-caret { color:#64748b;font-size:10px;transition:transform var(--dur-fast) var(--ease-out);display:inline-block; }
+  .sp-log-toggle.open .sp-log-caret { transform:rotate(90deg); }
+  .sp-log-toggle .sp-log-spacer { margin-left:auto; }
+  .sp-log-livebadge { display:inline-flex;align-items:center;gap:5px;font-size:10px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:#22c55e; }
+  .sp-log-livebadge .sp-log-dot { width:7px;height:7px;border-radius:50%;background:#22c55e;animation:sp-pulse 1.4s ease-in-out infinite; }
+  .sp-log { margin-top:8px;background:var(--bg);border:1px solid var(--surface-alt);border-radius:6px;height:62vh;max-height:620px;min-height:260px;overflow-y:auto;padding:8px; }
+  .sp-log-status { position:sticky;top:-8px;z-index:1;display:flex;align-items:center;gap:6px;font-size:10px;color:#64748b;margin:-8px -8px 8px;padding:8px;background:var(--bg);border-bottom:1px solid var(--surface-alt);text-transform:uppercase;letter-spacing:.5px; }
+  .sp-log-dot { width:7px;height:7px;border-radius:50%;background:#475569;flex-shrink:0; }
+  .sp-log-status.live .sp-log-dot { background:#22c55e;animation:sp-pulse 1.4s ease-in-out infinite; }
+  @keyframes sp-pulse { 0%,100%{opacity:1;} 50%{opacity:.25;} }
+  .sp-log-empty { font-size:11px;color:#475569;padding:6px 2px; }
+  .sp-turn { margin-bottom:8px;padding:7px 9px;border-radius:5px;border-left:2px solid var(--surface-alt);background:rgba(255,255,255,.02); }
+  .sp-turn.assistant { border-left-color:#3b82f6; }
+  .sp-turn-role { font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:#64748b;margin-bottom:4px; }
+  .sp-turn-time { font-size:9px;font-weight:400;text-transform:none;letter-spacing:0;color:#475569;margin-left:6px; }
+  .sp-turn-text { font-size:12px;color:var(--text-muted);line-height:1.5;white-space:pre-wrap;word-break:break-word; }
+  .sp-log-thinking { display:flex;align-items:center;gap:6px;font-size:11px;color:#64748b;font-style:italic;padding:4px 9px; }
+  .sp-log-thinking .sp-log-dot { background:#3b82f6;animation:sp-pulse 1.4s ease-in-out infinite; }
+  .sp-turn-tools { display:flex;flex-wrap:wrap;gap:5px;margin-top:5px; }
+  /* commands/reads no longer truncate — the arg wraps so full commands are readable */
+  .sp-tool-chip { position:relative;display:inline-flex;align-items:baseline;gap:5px;max-width:100%;font-size:10px;background:#0b1220;border:1px solid #334155;border-radius:4px;padding:2px 6px;color:#94a3b8; }
+  .sp-tool-chip .sp-tool-name { color:#60a5fa;font-weight:600;flex-shrink:0; }
+  .sp-tool-chip .sp-tool-arg { color:#64748b;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+  /* a chip whose tool returned output pops a result bubble on click (or on focus) */
+  .sp-tool-chip.has-result { cursor:pointer;border-color:#3b5172; }
+  .sp-tool-chip.has-result:hover, .sp-tool-chip.has-result:focus-within { border-color:#60a5fa;background:#0d1729; }
+  .sp-tool-chip.has-result .sp-tool-name::after { content:"◂";margin-left:4px;color:#64748b;font-weight:400; }
+  /* Bubble visibility is owned by JS (.show), not :hover — opened on click, closed on
+     click-away. Lifted to fixed/viewport coords to the LEFT of the chip so it escapes
+     the scrollable log container and can use the full screen height. */
+  .sp-tool-result { display:none;position:absolute;z-index:30;width:min(560px,calc(100vw - 64px));max-height:90vh;overflow:auto;background:#070d18;border:1px solid #2a3b55;border-radius:6px;box-shadow:0 10px 30px rgba(0,0,0,.55);padding:8px 10px;cursor:auto; }
+  .sp-tool-result.show { display:block; }
+  .sp-tool-result-head { display:block;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:#60a5fa;margin-bottom:6px; }
+  .sp-tool-result pre { margin:0;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;line-height:1.5;color:#cbd5e1;white-space:pre-wrap;word-break:break-word; }
   /* spec / plan section */
   .sp-spec { background:var(--bg);border:1px solid var(--surface-alt);border-radius:6px;margin-bottom:8px;overflow:hidden; }
   .sp-spec-head { display:flex;align-items:center;gap:8px;padding:8px 10px;cursor:pointer;user-select:none; }
@@ -349,6 +385,24 @@
   .form-check { display:flex;align-items:center;gap:8px;flex-direction:row;font-size:12px;cursor:pointer; }
   .form-check input { margin:0;cursor:pointer; }
   .form-actions { display:flex;justify-content:flex-end;gap:10px;margin-top:18px; }
+  /* setup-page toggle switch */
+  .sw-row { display:flex;align-items:center;gap:12px;margin-bottom:14px; }
+  .sw-label { font-size:13px;color:var(--text);flex:1; }
+  .sw-label small { display:block;font-size:11px;color:var(--text-muted);margin-top:1px; }
+  .sw { position:relative;display:inline-block;width:40px;height:22px;flex-shrink:0; }
+  .sw input { opacity:0;width:0;height:0;position:absolute; }
+  .sw-track { position:absolute;inset:0;background:#475569;border-radius:999px;cursor:pointer;transition:background 150ms; }
+  .sw input:checked ~ .sw-track { background:#22c55e; }
+  .sw input:disabled ~ .sw-track { opacity:0.4;cursor:not-allowed; }
+  .sw-thumb { position:absolute;top:3px;left:3px;width:16px;height:16px;background:#fff;border-radius:50%;transition:left 150ms;pointer-events:none; }
+  .sw input:checked ~ .sw-thumb { left:21px; }
+  /* setup-page compact grid for number inputs */
+  .setup-grid { display:grid;grid-template-columns:1fr 1fr;gap:10px 20px;margin-bottom:18px; }
+  .setup-field { display:flex;align-items:center;gap:8px;font-size:13px; }
+  .setup-field label { color:var(--text-muted);white-space:nowrap;font-size:12px; }
+  .setup-field input { width:80px;background:var(--bg);color:var(--text);border:1px solid #475569;border-radius:5px;padding:5px;font-size:13px; }
+  .setup-section { font-size:14px;font-weight:700;margin:0 0 12px;color:var(--text); }
+  .setup-divider { border:none;border-top:1px solid var(--surface-alt);margin:20px 0; }
   .btn { border:none;border-radius:5px;padding:7px 16px;font-size:12px;font-weight:600;cursor:pointer; }
   .btn-cancel { background:var(--surface-alt);color:var(--text-muted); }
   .btn-create { background:#22c55e;color:#fff; }
@@ -357,6 +411,12 @@
   #toast.show { opacity:1;transform:translateY(0); }
   #toast.err { border-color:#ef4444;color:#fca5a5; }
   @media(max-width:860px){ .board{flex-direction:column;overflow-y:auto;} .column{max-width:100%;} .col-body{overflow-y:visible;} :root{--panel-w:100vw;} }
+  /* Ticket #66: responsive top bar — wrap to a tidy second row instead of crushing/overflowing.
+     The board selector's 240px min-width is the main overflow culprit at narrow widths, so it's
+     allowed to shrink and flex; the status pill drops its margin-left:auto push so a wrapped row
+     stays left-aligned rather than stranding the pill alone on the right. */
+  @media(max-width:1100px){ .topbar select{ min-width:160px; flex:1 1 200px; } }
+  @media(max-width:780px){ .topbar select{ flex-basis:140px; } .status-indicator{ margin-left:0; } }
 </style>
 
 <div class="main-wrap">
@@ -364,9 +424,16 @@
     <div style="flex:1;text-align:center;padding:60px;color:#475569;font-size:14px;">Select a board above.</div>
   </div>
 </div>
-<div class="view-panel" id="view-profiles" style="display:none;padding:18px;overflow:auto;height:calc(100vh - 52px);"></div>
-<div class="view-panel" id="view-orchestrator" style="display:none;padding:18px;overflow:auto;height:calc(100vh - 52px);"></div>
-<div class="view-panel" id="view-performance" style="display:none;padding:18px;overflow:auto;height:calc(100vh - 52px);"></div>
+<!-- Setup: merged project-agnostic config + live orchestrator controls (ticket #64).
+     Holds the orchestrator panel (live controls + inbox/in-flight/activity) above the
+     profiles panel (concurrency cap + agent profiles). renderOrchestrator()/renderProfiles()
+     keep writing into their own inner panels unchanged. -->
+<div class="view-panel" id="view-setup" style="display:none;overflow:auto;height:calc(100vh - var(--topbar-h, 52px));">
+  <div id="view-orchestrator" style="padding:18px 18px 0;"></div>
+  <hr style="border:none;border-top:1px solid var(--surface-alt);margin:8px 18px 0;">
+  <div id="view-profiles" style="padding:18px;"></div>
+</div>
+<div class="view-panel" id="view-performance" style="display:none;padding:18px;overflow:auto;height:calc(100vh - var(--topbar-h, 52px));"></div>
 
 <!-- Side Panel -->
 <div class="side-panel" id="sidePanel">
@@ -392,6 +459,9 @@
       </div>
     </div>
     <form id="taskForm" autocomplete="off">
+      <label class="form-label">Board <span class="req">*</span>
+        <select id="fBoard" class="form-input"></select>
+      </label>
       <label class="form-label">Title <span class="req">*</span>
         <input type="text" id="fTitle" class="form-input" placeholder="Task title" required>
       </label>
@@ -412,9 +482,9 @@
           <input type="text" id="fDepends" class="form-input" placeholder="e.g. 1, 3">
         </label>
       </div>
-      <label class="form-label">Model
+      <label class="form-label">Model (optional)
         <select id="fModel" class="form-input">
-          <option value="">(default)</option>
+          <option value="">(default - orchestrator decides)</option>
           <option value="claude-haiku-4-5-20251001">Haiku (small)</option>
           <option value="claude-sonnet-4-6">Sonnet (medium)</option>
           <option value="claude-opus-4-8">Opus (large)</option>
@@ -499,6 +569,13 @@ const MODEL_OPTIONS = [
   {value:"claude-sonnet-4-6", label:"Sonnet (medium)"},
   {value:"claude-opus-4-8", label:"Opus (large)"},
 ];
+function getModelName(modelId){
+  const m=MODEL_OPTIONS.find(x=>x.value===modelId);
+  if(m)return m.label;
+  if(!modelId)return "(default)";
+  const match=modelId.match(/claude-(\w+)/);
+  return match?match[1].charAt(0).toUpperCase()+match[1].slice(1):modelId;
+}
 let currentFile=null, lastMtime=0, pollTimer=null, dragTaskId=null, dragFile=null, dragEl=null;
 let currentTasks=[], selectedTaskKey=null, currentBoardData=null;
 // Ticket #61: while an optimistic drag-drop is reconciling, remember the moved
@@ -553,6 +630,17 @@ function compareCards(a,b){
   return 0;
 }
 
+// Ready column ordering: sort by explicit `order` field (ascending).
+// Tickets without an order sort after those with one, then by numeric id.
+// Ready column: explicit `order` field (ascending) takes priority; unordered tickets
+// sort last and fall back to lastUpdate desc (most recently active first).
+function compareReadyCards(a,b){
+  const oa=a.order!=null?Number(a.order):Infinity;
+  const ob=b.order!=null?Number(b.order):Infinity;
+  if(oa!==ob)return oa<ob?-1:1;
+  return compareCards(a,b);
+}
+
 function reviewedKey(task){
   return "kanban-reviewed:"+(task._filePath||task.id);
 }
@@ -585,40 +673,58 @@ function showToast(msg,err){const t=$("toast");t.textContent=msg;t.className="sh
 
 async function apiFetch(url,opts){opts=opts||{};if(window.KANBAN_TOKEN){opts.headers=Object.assign({"X-Kanban-Token":window.KANBAN_TOKEN},opts.headers||{});}const r=await fetch(url,opts);if(!r.ok)throw new Error("HTTP "+r.status);return r.json();}
 
+// Ticket #65: all top-bar status now flows through one compact pill. setServerDown and
+// checkOrchStatus update this shared state; renderStatusPill() collapses it into a single
+// dot color + short label, with the full detail (offline reason, orch state, last-updated)
+// moved into the pill's title tooltip. No state source was dropped, only the presentation.
+const pillState={serverDown:false,orch:null,lastUpdated:""};
+
+function renderStatusPill(){
+  const pill=$("statusPill"),dot=$("dot"),text=$("statusText");
+  if(!pill)return;
+  let kind,label,title;
+  if(pillState.serverDown){
+    kind="offline";label="offline";
+    title="Cannot reach the kanban server. Is kanban_server.py running?";
+  } else {
+    const o=pillState.orch;
+    if(o&&o.stopAllRequested){
+      kind="degraded";label="agents stopped";
+      title="Stop-all was requested — all agents halted";
+    } else if(o&&o.usagePause){
+      // Ticket #60: parked by a Claude usage limit; resumes automatically.
+      const mins=Math.max(1,Math.round((o.usagePause.remainingSeconds||0)/60));
+      kind="degraded";label="usage limited";
+      title="Claude usage limit reached — dispatch is paused and will resume automatically when the limit resets (~"+mins+"m).";
+    } else if(o&&!o.enabled){
+      kind="degraded";label="orch paused";
+      title="Orchestrator is paused — not picking up new tickets.";
+    } else {
+      kind="healthy";label="live";
+      title="Connected — orchestrator running.";
+    }
+    if(pillState.lastUpdated)title+="\n"+pillState.lastUpdated;
+  }
+  pill.classList.remove("degraded","offline");
+  if(kind!=="healthy")pill.classList.add(kind);
+  text.textContent=label;
+  pill.title=title;
+}
+
 function setServerDown(down){
-  $("dot").classList.toggle("error",down);
-  $("statusText").textContent=down?"offline":"live";
-  $("serverDownBadge").classList.toggle("visible",down);
-  if(down)$("lastUpdated").textContent="";
+  pillState.serverDown=down;
+  if(down)pillState.lastUpdated="";
+  renderStatusPill();
 }
 
 async function checkOrchStatus(){
   try{
-    const state=await apiFetch("/api/orchestrator/state");
-    const badge=$("orchStatusBadge");
-    if(state.stopAllRequested){
-      badge.className="orch-status-badge stopped visible";
-      badge.title="Stop-all was requested — all agents halted";
-      badge.innerHTML='<span>&#x26D4;</span> Agents stopped';
-    } else if(state.usagePause){
-      // Ticket #60: parked by a Claude usage limit; resumes automatically.
-      const mins=Math.max(1,Math.round((state.usagePause.remainingSeconds||0)/60));
-      badge.className="orch-status-badge paused visible";
-      badge.title="Claude usage limit reached — dispatch is paused and will resume automatically when the limit resets";
-      badge.innerHTML='<span>&#x23F3;</span> Usage limited — resumes in ~'+mins+'m';
-    } else if(!state.enabled){
-      badge.className="orch-status-badge paused visible";
-      badge.title="Orchestrator is paused — not picking up new tickets";
-      badge.innerHTML='<span>&#x23F8;</span> Orchestrator paused';
-    } else {
-      badge.className="orch-status-badge";
-      badge.innerHTML="";
-    }
+    pillState.orch=await apiFetch("/api/orchestrator/state");
   }catch(e){
-    // server is down — serverDownBadge already shown; silence orch check
-    $("orchStatusBadge").className="orch-status-badge";
-    $("orchStatusBadge").innerHTML="";
+    // server is down — pill already reflects offline; clear orch detail.
+    pillState.orch=null;
   }
+  renderStatusPill();
 }
 
 async function loadFiles(){
@@ -642,8 +748,8 @@ async function poll(){
     const data=await apiFetch("/api/board/"+encodeURIComponent(currentFile));
     currentBoardData=data;
     if(data.mtime!==lastMtime){lastMtime=data.mtime;currentTasks=data.tasks||[];renderBoard(data);if(selectedTaskKey)refreshPanel();}
+    pillState.lastUpdated="Updated "+new Date().toLocaleTimeString();
     setServerDown(false);
-    $("lastUpdated").textContent="updated "+new Date().toLocaleTimeString();
     checkOrchStatus();
   }catch(e){setServerDown(true);}
 }
@@ -723,6 +829,44 @@ async function dropTask(file,taskId,newCol,cardEl,targetBody){
     showToast("Failed to move task #"+taskId,true);
   }
 }
+async function updateTaskOrder(file,taskId,order){
+  try{await apiFetch("/api/board/"+encodeURIComponent(file)+"/task/"+encodeURIComponent(taskId),{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({order})});lastMtime=0;}
+  catch(e){showToast("Failed to reorder task #"+taskId,true);}
+}
+
+// Reorder within Ready: assigns dense order values across ALL boards, swaps the
+// clicked card with its neighbour, then PATCHes both. Optimistic update plays the
+// FLIP animation immediately so the reorder feels instant.
+async function reorderReady(file,taskId,direction){
+  const readyTasks=currentTasks
+    .filter(t=>t._column==="ready")
+    .slice().sort(compareReadyCards);
+  const idx=readyTasks.findIndex(t=>String(t.id)===String(taskId)&&(t._board||file)===file);
+  if(idx<0)return;
+  const swapIdx=direction==="up"?idx-1:idx+1;
+  if(swapIdx<0||swapIdx>=readyTasks.length)return;
+  // Assign dense order values 0,1,2,... then swap the two positions.
+  readyTasks.forEach((t,i)=>{t.order=i;});
+  const tmp=readyTasks[idx].order;readyTasks[idx].order=readyTasks[swapIdx].order;readyTasks[swapIdx].order=tmp;
+  // Optimistic: mutate currentTasks order values and re-render so FLIP plays now.
+  readyTasks.forEach(t=>{
+    const live=currentTasks.find(x=>taskKey(x)===taskKey(t));
+    if(live)live.order=t.order;
+  });
+  if(currentBoardData)renderBoard(currentBoardData);
+  // PATCH the two swapped tickets (may be on different boards).
+  const a=readyTasks[idx],b=readyTasks[swapIdx];
+  try{
+    await Promise.all([
+      apiFetch("/api/board/"+encodeURIComponent(a._board||file)+"/task/"+encodeURIComponent(String(a.id)),
+        {method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({order:a.order})}),
+      apiFetch("/api/board/"+encodeURIComponent(b._board||file)+"/task/"+encodeURIComponent(String(b.id)),
+        {method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({order:b.order})}),
+    ]);
+    lastMtime=0;poll();
+  }catch(e){showToast("Failed to reorder",true);lastMtime=0;poll();}
+}
+
 async function updateTaskModel(file,taskId,model){
   try{await apiFetch("/api/board/"+encodeURIComponent(file)+"/task/"+encodeURIComponent(taskId),{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({model})});lastMtime=0;showToast("Task #"+taskId+" model → "+(model||"default"));}
   catch(e){showToast("Failed to set model for #"+taskId,true);}
@@ -755,6 +899,8 @@ function openPanel(task){
 }
 function closePanel(){
   if(dockMode){undock();return;} // panel is showing the docked Create Task form
+  hideToolResult(); // a bubble portaled to <body> must not outlive the panel
+  stopLogPoll();logPoll.openKey=null;
   selectedTaskKey=null;
   $("sidePanel").classList.remove("open");
   $("board").classList.remove("panel-open");
@@ -776,7 +922,217 @@ function refreshPanel(){
     if(focusedId)$(focusedId).focus();
   }
 }
+// ── Live logs poll ──────────────────────────────────────────────────────
+// A single active poll at a time. `logPoll.openKey` remembers which task's log
+// the user had expanded so the inline view re-opens across panel re-renders
+// (refreshPanel rebuilds the DOM every poll tick).
+const logPoll={timer:null,openKey:null};
+function stopLogPoll(){ if(logPoll.timer){clearInterval(logPoll.timer);logPoll.timer=null;} }
+function renderLogTurns(turns,running){
+  const box=$("spLog");
+  if(!box)return;
+  // innerHTML below detaches any shown result bubble; drop stale hover state so a
+  // dangling node reference can't keep a ghost bubble "open".
+  hideToolResult();
+  let h='<div class="sp-log-status'+(running?' live':'')+'"><span class="sp-log-dot"></span><span>'+(running?'live — implementer agent':'stream ended')+'</span></div>';
+  if(!turns||!turns.length){
+    h+='<div class="sp-log-empty">'+(running?'Waiting for output…':'No output captured for this run.')+'</div>';
+  }else{
+    // Every turn is the implementer's own — thoughts plus the commands/reads it
+    // ran. Tool results aren't echoed inline; hovering a chip with a result pops
+    // the full output in a bubble, and clicking pins it open (see bindLogBox).
+    turns.forEach(t=>{
+      h+='<div class="sp-turn assistant"><div class="sp-turn-role">🤖 implementer';
+      if(t.timestamp){
+        const ts=new Date(t.timestamp);
+        h+=' <span class="sp-turn-time">'+esc(ts.toLocaleTimeString())+'</span>';
+      }
+      h+='</div>';
+      if(t.text) h+='<div class="sp-turn-text">'+esc(t.text)+'</div>';
+      if(t.tools&&t.tools.length){
+        h+='<div class="sp-turn-tools">';
+        t.tools.forEach(tool=>{
+          const hasRes=!!(tool.result&&tool.result.length);
+          h+='<span class="sp-tool-chip'+(hasRes?' has-result':'')+'" tabindex="'+(hasRes?'0':'-1')+'">'
+            +'<span class="sp-tool-name">'+esc(tool.name)+'</span>'
+            +(tool.summary?'<span class="sp-tool-arg">'+esc(tool.summary)+'</span>':'')
+            +(hasRes?'<span class="sp-tool-result"><span class="sp-tool-result-head">'+esc(tool.name)+' result</span><pre>'+esc(tool.result)+'</pre></span>':'')
+          +'</span>';
+        });
+        h+='</div>';
+      }
+      h+='</div>';
+    });
+    // While the agent is still running, the newest turn we have is usually a
+    // tool_use awaiting its result — show a live "working…" cue so the stream
+    // doesn't look frozen between polls.
+    if(running){
+      const last=turns[turns.length-1];
+      if(last&&last.tools&&last.tools.length)
+        h+='<div class="sp-log-thinking"><span class="sp-log-dot"></span><span>working…</span></div>';
+    }
+  }
+  // Preserve "user is reading scrollback" — only auto-scroll if already near bottom.
+  const nearBottom=box.scrollHeight-box.scrollTop-box.clientHeight<60;
+  box.innerHTML=h;
+  if(nearBottom)box.scrollTop=box.scrollHeight;
+}
+// Result bubbles open on hover (with a short leave-grace so the mouse can cross
+// the gap into the bubble) and pin open on click; click-away or a second click
+// closes a pinned bubble. The bubble is lifted to fixed/viewport coords to the
+// LEFT of the chip so it escapes the scrollable log container. One delegated
+// listener set survives the 2s innerHTML re-renders. Keyboard focus shows the
+// bubble instantly (a11y parity with hover).
+const toolHover={chip:null,bub:null,pinned:false,hideTimer:null};
+function placeToolResult(chip,bub){
+  bub.classList.add("show");      // must be displayed to measure its width/height
+  const r=chip.getBoundingClientRect();
+  const w=bub.offsetWidth, gap=8;
+  bub.style.position="fixed";
+  // Prefer LEFT of the chip; flip to the right only if it would overflow the left edge.
+  let left=r.left-gap-w;
+  if(left<8) left=Math.min(r.right+gap, window.innerWidth-w-8);
+  bub.style.left=Math.max(8,left)+"px";
+  // Vertically: align the bubble's top with the chip, clamped into the viewport so a
+  // tall result never spills off-screen (it scrolls internally, capped at 90vh by CSS).
+  const h=Math.min(bub.offsetHeight,window.innerHeight-16);
+  let top=r.top;
+  if(top+h>window.innerHeight-8) top=window.innerHeight-h-8;
+  bub.style.bottom="auto";bub.style.top=Math.max(8,top)+"px";
+}
+function clearToolTimers(){
+  if(toolHover.hideTimer){clearTimeout(toolHover.hideTimer);toolHover.hideTimer=null;}
+}
+function hideToolResult(){
+  clearToolTimers();
+  // Return a portaled bubble to its chip so :scope > .sp-tool-result finds it
+  // next time (and so it dies with the chip on the next innerHTML re-render).
+  if(toolHover.bub){
+    toolHover.bub.classList.remove("show");
+    if(toolHover.chip&&toolHover.bub.parentNode!==toolHover.chip)
+      toolHover.chip.appendChild(toolHover.bub);
+  }
+  toolHover.chip=null;toolHover.bub=null;toolHover.pinned=false;
+}
+function showToolResult(chip){
+  // While the panel slides shut, chips sweep under the (stationary) cursor and
+  // Chromium synthesizes mouseover — without this guard that resurrects a
+  // bubble on <body> after the panel is gone.
+  if(!$("sidePanel").classList.contains("open"))return;
+  const bub=chip.querySelector(":scope > .sp-tool-result");
+  if(!bub)return;
+  if(toolHover.chip===chip){clearToolTimers();return;} // already open — just cancel any pending hide
+  hideToolResult();
+  toolHover.chip=chip;toolHover.bub=bub;
+  // PORTAL: the side panel is CSS-transformed (.side-panel.open translateX),
+  // which makes it the containing block for position:fixed descendants — the
+  // bubble's viewport coords would resolve panel-relative and be clipped by the
+  // panel's overflow:hidden (visible in the DOM, zero pixels on screen). Lift
+  // the bubble to <body> while shown so fixed really means the viewport.
+  document.body.appendChild(bub);
+  // The bubble is outside the log box now, so box delegation can't keep it
+  // alive — cancel/schedule the hide from the bubble itself.
+  if(!bub._hoverBound){
+    bub._hoverBound=true;
+    bub.addEventListener("mouseenter",clearToolTimers);
+    bub.addEventListener("mouseleave",()=>{if(!toolHover.pinned)scheduleHideToolResult();});
+  }
+  placeToolResult(chip,bub);
+}
+// Leave-grace: the bubble sits ~8px away from the chip, so the mouse crosses a
+// dead zone on the way over. Hide on a short delay, cancelled if the mouse
+// arrives on the bubble (a DOM child of the chip) or back on the chip.
+function scheduleHideToolResult(){
+  clearToolTimers();
+  toolHover.hideTimer=setTimeout(()=>{toolHover.hideTimer=null;hideToolResult();},300);
+}
+// Click-away: close the open bubble when clicking anywhere outside it or its chip.
+document.addEventListener("click",e=>{
+  if(!toolHover.bub)return;
+  if(toolHover.chip&&toolHover.chip.contains(e.target))return; // chip click handled by bindLogBox
+  if(toolHover.bub.contains(e.target))return;                  // click inside bubble — keep open
+  hideToolResult();
+},true);
+function bindLogBox(box){
+  if(box._resultBound)return; box._resultBound=true;
+  // Hover over a chip (or its bubble, a DOM child) → show; cancel pending hide.
+  box.addEventListener("mouseover",e=>{
+    const chip=e.target.closest&&e.target.closest(".sp-tool-chip.has-result");
+    if(!chip)return;
+    if(chip===toolHover.chip){clearToolTimers();return;}
+    if(toolHover.pinned)return; // don't steal a clicked-open bubble on hover
+    showToolResult(chip);
+  });
+  box.addEventListener("mouseout",e=>{
+    if(toolHover.pinned||!toolHover.chip)return;
+    const from=e.target.closest&&e.target.closest(".sp-tool-chip.has-result");
+    if(from!==toolHover.chip)return;
+    const to=e.relatedTarget;
+    if(to&&toolHover.chip.contains(to))return; // still within chip/bubble
+    scheduleHideToolResult();
+  });
+  // Click pins the bubble open so it survives the mouse leaving; a second click
+  // (or click-away, above) closes it. NOTE: mousedown focuses the chip and
+  // focusin may have just opened the bubble — pin rather than toggle-close in
+  // that case, or the click instantly closes what the focus opened.
+  box.addEventListener("click",e=>{
+    const chip=e.target.closest&&e.target.closest(".sp-tool-chip.has-result");
+    if(!chip)return;
+    if(e.target.closest&&e.target.closest(".sp-tool-result"))return; // clicks inside the bubble never toggle
+    if(toolHover.chip===chip){
+      if(toolHover.pinned){hideToolResult();}
+      else{toolHover.pinned=true;clearToolTimers();}
+      return;
+    }
+    showToolResult(chip);
+    toolHover.pinned=true;
+  });
+  // Keyboard focus shows the result immediately (a11y).
+  box.addEventListener("focusin",e=>{
+    const chip=e.target.closest&&e.target.closest(".sp-tool-chip.has-result");
+    if(!chip||chip===toolHover.chip||toolHover.pinned)return;
+    showToolResult(chip);
+  });
+  box.addEventListener("focusout",e=>{
+    const chip=e.target.closest&&e.target.closest(".sp-tool-chip.has-result");
+    if(chip&&chip===toolHover.chip&&!toolHover.pinned)scheduleHideToolResult();
+  });
+}
+async function pollLog(board,taskId){
+  if(!$("spLog"))return; // panel re-rendered/closed without our log open
+  try{
+    const data=await apiFetch("/api/board/"+encodeURIComponent(board)+"/task/"+encodeURIComponent(taskId)+"/log?n=25");
+    if(logPoll.openKey===null||!$("spLog"))return; // closed mid-flight
+    renderLogTurns(data.turns,data.running);
+    if(!data.running)stopLogPoll(); // agent finished — stop hammering the endpoint
+  }catch(e){ /* transient; next tick retries */ }
+}
+function startLogPoll(board,taskId){
+  stopLogPoll();
+  pollLog(board,taskId);
+  logPoll.timer=setInterval(()=>pollLog(board,taskId),2000);
+}
+function bindLogToggle(task,srcFile){
+  const btn=$("spLogToggle"),box=$("spLog");
+  if(!btn||!box)return;
+  const key=taskKey(task);
+  function open(){
+    btn.classList.add("open");box.style.display="block";logPoll.openKey=key;
+    box.innerHTML='<div class="sp-log-empty">Loading…</div>';
+    bindLogBox(box);
+    startLogPoll(srcFile,String(task.id));
+  }
+  function close(){
+    btn.classList.remove("open");box.style.display="none";logPoll.openKey=null;stopLogPoll();
+  }
+  btn.addEventListener("click",()=>{ logPoll.openKey===key?close():open(); });
+  // Re-open automatically if this task's log was open before the re-render.
+  if(logPoll.openKey===key)open();
+}
+
 function renderPanel(task){
+  stopLogPoll(); // clear any prior poll; bindLogToggle re-arms it if still open
+  hideToolResult(); // a bubble portaled to <body> must not outlive its chip
   $("spTitle").textContent="#"+task.id+" "+task.title;
   const body=$("spBody");body.innerHTML="";
 
@@ -833,6 +1189,23 @@ function renderPanel(task){
   });
   html+='<div class="sp-comment-form"><input type="text" id="spCWriter" placeholder="Your name"><textarea id="spCMsg" placeholder="Write a comment..."></textarea><button type="button" id="spCPost">Post Comment</button></div></div>';
 
+  // Logs section — present whenever a sub-agent has been dispatched for this
+  // ticket (it has an orchestrator run-log), and stays available after the
+  // ticket is done so you can read back what the implementer did. Expands
+  // inline; polls only while the agent is still running ("live" badge).
+  // The orchestrator block is cleared on reap (clear_marker), so also accept
+  // the top-level runLogFile pointer (survives the clear; ticket #74) and
+  // completedLog (turns saved at completion; ticket #58) as signals.
+  const hasLog=(task.orchestrator&&task.orchestrator.logFile)||task.runLogFile||
+               (Array.isArray(task.completedLog)&&task.completedLog.length>0);
+  if(hasLog){
+    const agentLive=task.orchestrator&&task.orchestrator.state==="dispatched"&&task._column==="in_progress";
+    html+='<div class="sp-section"><div class="sp-section-title">Logs</div>';
+    html+='<button type="button" class="sp-log-toggle" id="spLogToggle"><span class="sp-log-caret">▶</span><span>📡 Logs</span><span class="sp-log-spacer"></span>'+(agentLive?'<span class="sp-log-livebadge"><span class="sp-log-dot"></span>live</span>':'')+'</button>';
+    html+='<div class="sp-log" id="spLog" style="display:none;"></div>';
+    html+='</div>';
+  }
+
   // History section
   const history=task.history||[];
   html+='<div class="sp-section"><div class="sp-section-title">History ('+history.length+')</div>';
@@ -870,10 +1243,13 @@ function renderPanel(task){
   });
   const copyBtn=$("spCopySession");
   if(copyBtn) copyBtn.addEventListener("click",()=>{
-    navigator.clipboard.writeText("claude --resume "+task.claudeSessionId)
+    const dir=task.claudeSessionDir;
+    const cmd=dir?"cd '"+dir+"'; claude --resume "+task.claudeSessionId:"claude --resume "+task.claudeSessionId;
+    navigator.clipboard.writeText(cmd)
       .then(()=>showToast("Copied resume command"))
       .catch(()=>showToast("Copy failed",true));
   });
+  bindLogToggle(task,srcFile);
 
   // Spec rows: toggle inline preview; fetch + render markdown on first open.
   // The "Open ↗" link is a normal anchor (new tab) — stop it bubbling so the
@@ -1117,7 +1493,7 @@ function renderBoard(data){
 
   const liveCols={};
   data.columns.forEach((col,colIdx)=>{
-    const tasks=(buckets[col.key]||[]).slice().sort(compareCards);
+    const tasks=(buckets[col.key]||[]).slice().sort(col.key==="ready"?compareReadyCards:compareCards);
     let colEl=existingCols[col.key],hdr,body;
     if(!colEl){
       colEl=document.createElement("div");colEl.className="column";colEl.dataset.col=col.key;colEl.style.setProperty("--col-color",col.color);colEl._color=col.color;
@@ -1269,6 +1645,20 @@ function makeCard(task,color,filename){
   const statusBadge=document.createElement("span");statusBadge.className="card-status-badge";statusBadge.textContent=COL_LABELS[task._column]||task.status;right.appendChild(statusBadge);
   footer.appendChild(right);
   el.appendChild(footer);
+
+  // Ready-column order buttons: ▲ / ▼ appear on hover to move the card up/down.
+  if(task._column==="ready"){
+    const btns=document.createElement("div");btns.className="card-order-btns";
+    const upBtn=document.createElement("button");upBtn.type="button";upBtn.className="card-order-btn";upBtn.title="Move up in Ready";upBtn.textContent="▲";
+    const dnBtn=document.createElement("button");dnBtn.type="button";dnBtn.className="card-order-btn";dnBtn.title="Move down in Ready";dnBtn.textContent="▼";
+    btns.appendChild(upBtn);btns.appendChild(dnBtn);
+    el.appendChild(btns);
+    upBtn.addEventListener("click",e=>{e.preventDefault();e.stopPropagation();if(!upBtn.disabled)reorderReady(el._task._board||el._filename,String(el._task.id),"up");});
+    dnBtn.addEventListener("click",e=>{e.preventDefault();e.stopPropagation();if(!dnBtn.disabled)reorderReady(el._task._board||el._filename,String(el._task.id),"down");});
+    el._upBtn=upBtn;el._dnBtn=dnBtn;
+    updateOrderBtnState(el,task);
+  }
+
   // Ticket #63: fade/scale a freshly created card in. Only on incremental same-board
   // renders (motionOn) — first paint and board switches make every card "new" and
   // must not all animate. The class self-removes after the keyframes finish.
@@ -1277,6 +1667,18 @@ function makeCard(task,color,filename){
     el.addEventListener("animationend",e=>{if(e.animationName==="cardEnter")el.classList.remove("card-enter");},{once:true});
   }
   return el;
+}
+
+// Enable/disable up/down buttons based on the card's position across ALL ready tasks.
+function updateOrderBtnState(el,task){
+  if(!el._upBtn||!el._dnBtn)return;
+  const file=task._board||el._filename;
+  const readyTasks=currentTasks
+    .filter(t=>t._column==="ready")
+    .slice().sort(compareReadyCards);
+  const idx=readyTasks.findIndex(t=>String(t.id)===String(task.id)&&(t._board||file)===(task._board||file));
+  el._upBtn.disabled=(idx<=0);
+  el._dnBtn.disabled=(idx<0||idx>=readyTasks.length-1);
 }
 
 // Ticket #62: update a reused card's in-place fields (title, project, detail,
@@ -1323,14 +1725,24 @@ function updateCard(el,task,color,filename){
   const sb=el.querySelector(".card-status-badge");
   const stxt=COL_LABELS[task._column]||task.status;
   if(sb&&sb.textContent!==stxt)sb.textContent=stxt;
+
+  // Ready order buttons: refresh disabled state (position may have changed).
+  if(el._upBtn)updateOrderBtnState(el,task);
 }
 </script>
 
 <script>
 // â"€â"€ Create Task Modal â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 let dockMode=false; // true when the Create Task form is docked into the side panel
-function resetTaskForm(){$("fTitle").value="";$("fDetail").value="";$("fColumn").value="todo";$("fDepends").value="";$("fModel").value="";$("fOptional").checked=false;}
-function openModal(){undock();$("modal").classList.add("open");resetTaskForm();setTimeout(()=>$("fTitle").focus(),50);}
+function populateBoardSelect(preselect){
+  const sel=$("fBoard");sel.innerHTML="";
+  const placeholder=document.createElement("option");placeholder.value="";placeholder.textContent="— pick a board —";sel.appendChild(placeholder);
+  const src=$("boardSelect");
+  Array.from(src.options).forEach(o=>{if(o.value&&o.value!=="__all__"){const n=document.createElement("option");n.value=o.value;n.textContent=o.textContent;sel.appendChild(n);}});
+  sel.value=(preselect&&preselect!=="__all__")?preselect:"";
+}
+function resetTaskForm(){$("fBoard").value=currentFile&&currentFile!=="__all__"?currentFile:"";$("fTitle").value="";$("fDetail").value="";$("fColumn").value="todo";$("fDepends").value="";$("fOptional").checked=false;$("fModel").value="";}
+function openModal(){undock();populateBoardSelect(currentFile);$("modal").classList.add("open");resetTaskForm();setTimeout(()=>$("fTitle").focus(),50);}
 function closeModal(){if(dockMode){undock();return;}$("modal").classList.remove("open");}
 // Move the live <form> node into the side panel (keeps typed values + the single
 // submit handler) so the board stays visible/scrollable while creating a task.
@@ -1359,6 +1771,12 @@ function undock(){
   dockMode=false;
 }
 $("addBtn").addEventListener("click",openModal);
+$("nudgeBoardBtn").addEventListener("click",async ()=>{
+  try{await apiFetch("/api/orchestrator/nudge",{method:"POST"});
+  showToast("Tick queued — refreshing in 2s…");
+  setTimeout(poll, 2000);}
+  catch(e){showToast("Failed to nudge orchestrator",true);}
+});
 $("markAllReadBtn").addEventListener("click",()=>{
   currentTasks.forEach(t=>{if(isUnreviewed(t))markReviewed(t);});
   if(currentBoardData)renderBoard(currentBoardData);
@@ -1371,15 +1789,16 @@ document.addEventListener("keydown",e=>{if(e.key==="Escape"){closeModal();closeP
 
 let taskSubmitInFlight=false;
 $("taskForm").addEventListener("submit",async e=>{
-  e.preventDefault();if(!currentFile){showToast("No board selected",true);return;}
-  if(currentFile==="__all__"){showToast("Select a specific board to create a task",true);return;}
-  const payload={title:$("fTitle").value.trim(),detail:$("fDetail").value.trim(),column:$("fColumn").value,dependsOn:$("fDepends").value.trim(),model:$("fModel").value,optional:$("fOptional").checked};
+  e.preventDefault();
+  const targetBoard=$("fBoard").value;
+  if(!targetBoard){showToast("Select a board first",true);return;}
+  const payload={title:$("fTitle").value.trim(),detail:$("fDetail").value.trim(),column:$("fColumn").value,dependsOn:$("fDepends").value.trim(),optional:$("fOptional").checked,model:$("fModel").value.trim()};
   if(!payload.title){showToast("Title is required",true);return;}
   if(taskSubmitInFlight)return;
   taskSubmitInFlight=true;
   const btn=e.submitter||$("taskForm").querySelector('button[type="submit"]');
   if(btn)btn.disabled=true;
-  try{const res=await apiFetch("/api/board/"+encodeURIComponent(currentFile)+"/task",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});showToast("Created #"+res.task.id);resetTaskForm();if(dockMode)undock();else closeModal();lastMtime=0;poll();}
+  try{const res=await apiFetch("/api/board/"+encodeURIComponent(targetBoard)+"/task",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});showToast("Created #"+res.task.id);resetTaskForm();if(dockMode)undock();else closeModal();lastMtime=0;poll();}
   catch(err){showToast("Failed to create task",true);}
   finally{taskSubmitInFlight=false;if(btn)btn.disabled=false;}
 });
@@ -1430,15 +1849,13 @@ function switchView(view){
   document.querySelectorAll(".view-tab").forEach(b=>b.classList.toggle("active", b.dataset.view===view));
   const mainWrap=$("board").parentElement;
   mainWrap.style.display = view==="boards" ? "flex" : "none";
-  $("view-profiles").style.display = view==="profiles" ? "block" : "none";
-  $("view-orchestrator").style.display = view==="orchestrator" ? "block" : "none";
+  $("view-setup").style.display = view==="setup" ? "block" : "none";
   $("view-performance").style.display = view==="performance" ? "block" : "none";
   // Fade the newly visible panel in
   const active=view==="boards"?mainWrap:$("view-"+view);
   active.classList.add("view-fade-in");
   active.addEventListener("animationend",()=>active.classList.remove("view-fade-in"),{once:true});
-  if(view==="profiles") renderProfiles();
-  if(view==="orchestrator" && window.renderOrchestrator) renderOrchestrator();
+  if(view==="setup"){ if(window.renderOrchestrator) renderOrchestrator(); renderProfiles(); }
   if(view==="performance"){ perfActive=true; renderPerformance(); } else { perfActive=false; }
 }
 document.querySelectorAll(".view-tab").forEach(b=>b.addEventListener("click",()=>switchView(b.dataset.view)));
@@ -1450,48 +1867,39 @@ async function renderProfiles(){
   let profiles=[], state={};
   try{ profiles = (await apiFetch("/api/profiles")).profiles||[]; }catch(e){}
   try{ state = await apiFetch("/api/orchestrator/state"); }catch(e){}
-  let html = '<h2 style="font-size:16px;margin-bottom:12px;">Concurrency</h2>';
-  html += '<div style="margin-bottom:24px;">Max sub-agents in flight: '
-        + '<input type="number" id="capInput" min="0" max="20" value="'+(state.concurrencyCap??3)
-        + '" style="width:70px;background:var(--bg);color:var(--text);border:1px solid #475569;border-radius:5px;padding:5px;"> '
+  let html = '<p class="setup-section">Concurrency</p>';
+  html += '<div class="setup-grid">';
+  html += '<div class="setup-field"><label>Max agents in flight</label>'
+        + '<input type="number" id="capInput" min="0" max="20" value="'+(state.concurrencyCap??3)+'">'
         + '<button class="add-btn" id="capSave">Save</button></div>';
-  html += '<div style="margin-bottom:24px;">Idle reap timeout (seconds): '
-        + '<input type="number" id="idleInput" min="60" max="7200" value="'+(state.idleSeconds??600)
-        + '" style="width:80px;background:var(--bg);color:var(--text);border:1px solid #475569;border-radius:5px;padding:5px;"> '
+  html += '<div class="setup-field"><label>Idle reap (s)</label>'
+        + '<input type="number" id="idleInput" min="60" max="7200" value="'+(state.idleSeconds??600)+'">'
         + '<button class="add-btn" id="idleSave">Save</button></div>';
-  html += '<div style="margin-bottom:24px;">Tick interval (seconds): '
-        + '<input type="number" id="tickSecondsInput" min="5" max="3600" value="'+(state.tickSeconds??60)
-        + '" style="width:80px;background:var(--bg);color:var(--text);border:1px solid #475569;border-radius:5px;padding:5px;"> '
+  html += '<div class="setup-field"><label>Tick interval (s)</label>'
+        + '<input type="number" id="tickSecondsInput" min="5" max="3600" value="'+(state.tickSeconds??60)+'">'
         + '<button class="add-btn" id="tickSecondsSave">Save</button></div>';
-  html += '<div style="margin-bottom:24px;">Max agent wall-clock (seconds, 0=off): '
-        + '<input type="number" id="maxAgentSecondsInput" min="0" max="86400" value="'+(state.maxAgentSeconds??0)
-        + '" style="width:80px;background:var(--bg);color:var(--text);border:1px solid #475569;border-radius:5px;padding:5px;"> '
+  html += '<div class="setup-field"><label>Max agent wall-clock (s, 0=off)</label>'
+        + '<input type="number" id="maxAgentSecondsInput" min="0" max="86400" value="'+(state.maxAgentSeconds??0)+'">'
         + '<button class="add-btn" id="maxAgentSecondsSave">Save</button></div>';
-  html += '<div style="margin-bottom:24px;">LLM subprocess timeout (seconds): '
-        + '<input type="number" id="triageTimeoutSecondsInput" min="30" max="600" value="'+(state.triageTimeoutSeconds??120)
-        + '" style="width:80px;background:var(--bg);color:var(--text);border:1px solid #475569;border-radius:5px;padding:5px;"> '
+  html += '<div class="setup-field"><label>LLM subprocess timeout (s)</label>'
+        + '<input type="number" id="triageTimeoutSecondsInput" min="30" max="600" value="'+(state.triageTimeoutSeconds??120)+'">'
         + '<button class="add-btn" id="triageTimeoutSecondsSave">Save</button></div>';
-  html += '<h2 style="font-size:16px;margin-bottom:12px;">Loop models</h2>';
-  html += '<div style="color:var(--text-muted);font-size:12px;margin-bottom:10px;max-width:520px;">'
-        + 'Models for the orchestrator’s own background calls (triage every tick, the '
-        + 'pre-kill progress summarizer) — the highest-frequency background cost. '
-        + 'Leave blank for the Opus default.</div>';
-  html += '<div style="margin-bottom:14px;">Triage model: '
+  html += '</div>';
+  html += '<hr class="setup-divider">';
+  html += '<p class="setup-section">Loop models</p>';
+  html += '<div style="color:var(--text-muted);font-size:11px;margin-bottom:10px;max-width:520px;">'
+        + "Models for the orchestrator's background calls (triage, pre-kill summarizer). Leave blank for the Opus default.</div>";
+  html += '<div class="setup-field" style="margin-bottom:12px;"><label style="min-width:130px;">Triage model</label>'
         + '<input type="text" id="triageModelInput" placeholder="claude-opus-4-8" value="'+(state.triageModel??"")
-        + '" style="width:240px;background:var(--bg);color:var(--text);border:1px solid #475569;border-radius:5px;padding:5px;"> '
+        + '" style="width:240px;">'
         + '<button class="add-btn" id="triageModelSave">Save</button></div>';
-  html += '<div style="margin-bottom:24px;">Summarizer model: '
+  html += '<div class="setup-field" style="margin-bottom:20px;"><label style="min-width:130px;">Summarizer model</label>'
         + '<input type="text" id="summarizerModelInput" placeholder="claude-opus-4-8" value="'+(state.summarizerModel??"")
-        + '" style="width:240px;background:var(--bg);color:var(--text);border:1px solid #475569;border-radius:5px;padding:5px;"> '
+        + '" style="width:240px;">'
         + '<button class="add-btn" id="summarizerModelSave">Save</button></div>';
-  html += '<h2 style="font-size:16px;margin-bottom:12px;">Profiles</h2>';
+  html += '<hr class="setup-divider">';
+  html += '<p class="setup-section">Profiles</p>';
   html += '<button class="add-btn" id="newProfileBtn">+ New Profile</button><div id="profileList" style="margin-top:14px;"></div>';
-  html += '<hr style="border:none;border-top:1px solid var(--surface-alt);margin:24px 0;">';
-  html += '<h2 style="font-size:16px;margin-bottom:12px;">Server</h2>';
-  html += '<div style="color:var(--text-muted);font-size:12px;margin-bottom:8px;max-width:520px;">'
-        + 'Restart the server to pick up code changes. In-flight agents keep '
-        + 'running as separate processes and are re-adopted after the restart.</div>';
-  html += '<button class="sp-del-btn" id="restartServerBtn">Restart server</button>';
   wrap.innerHTML = html;
   $("capSave").addEventListener("click", async ()=>{
     try{await apiFetch("/api/orchestrator/state",{method:"PUT",headers:{"Content-Type":"application/json"},
@@ -1534,24 +1942,6 @@ async function renderProfiles(){
       body:JSON.stringify({summarizerModel:$("summarizerModelInput").value.trim()||"claude-opus-4-8"})});
     showToast("Summarizer model saved");}
     catch(e){showToast("Failed to save summarizer model",true);}
-  });
-  $("restartServerBtn").addEventListener("click", async ()=>{
-    if(!confirm("Restart server? In-flight agents keep running and will be re-adopted.")) return;
-    const btn=$("restartServerBtn"); btn.disabled=true;
-    try{ await apiFetch("/api/server/restart",{method:"POST"}); }catch(e){}
-    showToast("Restarting server…");
-    const t0=Date.now();
-    const waitBack=async ()=>{
-      try{
-        await apiFetch("/api/files");
-        showToast("Server back up");
-        renderProfiles();
-      }catch(e){
-        if(Date.now()-t0 < 15000) setTimeout(waitBack, 500);
-        else { showToast("Server did not come back", true); btn.disabled=false; }
-      }
-    };
-    setTimeout(waitBack, 800);
   });
   $("newProfileBtn").addEventListener("click",()=>editProfile({name:"",whenToUse:"",model:UI_CONFIG.newProfileModel,systemPrompt:"",allowedTools:UI_CONFIG.newProfileTools.slice(),enabled:true}));
   const list = $("profileList"); list.innerHTML="";
@@ -1647,6 +2037,7 @@ async function renderPerformance(){
       + "<td style='padding:6px 4px'>"+(open?"▾":"▸")+" PID "+s.pid
       +   badge(s.kind, s.kind==="headless"?"#a855f7":"#0ea5e9")
       +   badge(s.owned?"owned":"external", s.owned?"#64748b":"#ef4444")
+      +   (s.model?badge(getModelName(s.model),"#1f2937"):"")
       +   (s.ticket?(" "+s.board+"#"+s.ticket):"")
       + "</td>"
       + "<td style='padding:6px 4px;text-align:right'>"+s.cpuPercent+"%</td>"
@@ -1658,7 +2049,9 @@ async function renderPerformance(){
     if(open){
       let kids = (s.children||[]).map(c=>"PID "+c.pid+" "+c.name+" ("+c.cpuPercent
         +"%, "+c.memoryMB+"MB)").join("<br>") || "<i>no subprocesses</i>";
+      let modelInfo = s.model?("<div style='font-size:12px;color:var(--text-muted);margin-bottom:6px'>Model: <b>"+esc(s.model)+"</b></div>"):"";
       html += "<tr><td colspan='5' style='padding:8px 16px;background:var(--bg)'>"
+        + modelInfo
         + "<canvas width='520' height='90' data-pid='"+s.pid
         +   "' style='display:block;margin-bottom:8px;border:1px solid var(--surface-alt)'></canvas>"
         + "<div style='font-size:11px;color:#3b82f6'>■ CPU%</div>"
@@ -1708,21 +2101,21 @@ async function renderOrchestrator(){
   try{ activity = await apiFetch("/api/orchestrator/activity"); }catch(e){}
   try{ all = await apiFetch("/api/board/__all__"); }catch(e){}
 
-  let html = '<div style="display:flex;align-items:center;gap:14px;margin-bottom:18px;">';
-  html += '<button class="add-btn" id="orchToggle" style="background:'+(state.enabled?"#22c55e":"#6b7280")+'">'
-        + (state.enabled?"Picking up new tickets":"Paused — not picking up tickets")+'</button>';
-  html += '<button class="sp-del-btn" id="stopAll">Stop all</button>';
-  html += '<span style="color:var(--text-muted);font-size:12px;">Cap: '+(state.concurrencyCap??3)+'</span></div>';
-
   // Auto-commit / auto-push kill switch (ticket #55). Both default on; turning
   // auto-commit off makes completed tickets leave their diff uncommitted for review.
   const acOn = state.autoCommit!==false, apOn = state.autoPush!==false;
-  html += '<div style="display:flex;align-items:center;gap:14px;margin-bottom:18px;">';
-  html += '<button class="add-btn" id="autoCommitToggle" style="background:'+(acOn?"#22c55e":"#6b7280")+'">'
-        + (acOn?"Auto-commit on":"Auto-commit off — review diffs first")+'</button>';
-  html += '<button class="add-btn" id="autoPushToggle" style="background:'+(apOn?"#22c55e":"#6b7280")
-        + (acOn?"":";opacity:0.5")+'"'+(acOn?"":" disabled")+'>'
-        + (apOn?"Auto-push on":"Auto-push off — commit locally only")+'</button></div>';
+
+  let html = '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:20px;">';
+  html += '<button class="sp-del-btn" id="stopAll">Stop all agents</button>';
+  html += '<button class="sp-del-btn" id="restartServerBtn" style="background:#b45309;">Restart server</button>';
+  html += '</div>';
+
+  html += '<div class="sw-row"><label class="sw"><input type="checkbox" id="orchToggle"'+(state.enabled?" checked":"")+'><span class="sw-track"></span><span class="sw-thumb"></span></label>'
+        + '<span class="sw-label">Orchestrator running<small>'+(state.enabled?"Picking up new tickets":"Paused — not picking up tickets")+'</small></span></div>';
+  html += '<div class="sw-row"><label class="sw"><input type="checkbox" id="autoCommitToggle"'+(acOn?" checked":"")+'><span class="sw-track"></span><span class="sw-thumb"></span></label>'
+        + '<span class="sw-label">Auto-commit<small>'+(acOn?"Commits completed ticket diffs automatically":"Off — review diffs before committing")+'</small></span></div>';
+  html += '<div class="sw-row"><label class="sw"><input type="checkbox" id="autoPushToggle"'+(apOn?" checked":"")+(acOn?"":" disabled")+'><span class="sw-track"></span><span class="sw-thumb"></span></label>'
+        + '<span class="sw-label" style="'+(acOn?"":"opacity:0.45")+'">Auto-push<small>'+(apOn?"Pushes branch after committing":"Off — commits locally only")+'</small></span></div>';
 
   // Human-attention inbox.
   const needsHuman = (all.tasks||[]).filter(t=>t.orchestrator&&t.orchestrator.question&&!t.orchestrator.question.answer);
@@ -1737,11 +2130,12 @@ async function renderOrchestrator(){
   html += '<h2 style="font-size:16px;margin:18px 0 10px;">Activity</h2><div id="feed"></div>';
   wrap.innerHTML = html;
 
-  $("orchToggle").addEventListener("click", async ()=>{
+  $("orchToggle").addEventListener("change", async (ev)=>{
+    const val=ev.target.checked;
     try{await apiFetch("/api/orchestrator/state",{method:"PUT",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({enabled:!state.enabled})});
+      body:JSON.stringify({enabled:val})});
     renderOrchestrator();}
-    catch(e){showToast("Failed to toggle orchestrator",true);}
+    catch(e){ev.target.checked=!val;showToast("Failed to toggle orchestrator",true);}
   });
   $("stopAll").addEventListener("click", async ()=>{
     if(!confirm("Kill all in-flight agents?"))return;
@@ -1750,18 +2144,38 @@ async function renderOrchestrator(){
     showToast("Stop-all requested"); renderOrchestrator();}
     catch(e){showToast("Failed to request stop-all",true);}
   });
-  $("autoCommitToggle").addEventListener("click", async ()=>{
-    try{await apiFetch("/api/orchestrator/state",{method:"PUT",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({autoCommit:!acOn})});
-    showToast(acOn?"Auto-commit disabled":"Auto-commit enabled"); renderOrchestrator();}
-    catch(e){showToast("Failed to toggle auto-commit",true);}
+  $("restartServerBtn").addEventListener("click", async ()=>{
+    if(!confirm("Restart server? In-flight agents keep running and will be re-adopted.")) return;
+    const btn=$("restartServerBtn"); btn.disabled=true;
+    try{ await apiFetch("/api/server/restart",{method:"POST"}); }catch(e){}
+    showToast("Restarting server…");
+    const t0=Date.now();
+    const waitBack=async ()=>{
+      try{
+        await apiFetch("/api/files");
+        showToast("Server back up");
+        renderOrchestrator();
+      }catch(e){
+        if(Date.now()-t0 < 15000) setTimeout(waitBack, 500);
+        else { showToast("Server did not come back", true); btn.disabled=false; }
+      }
+    };
+    setTimeout(waitBack, 800);
   });
-  const apBtn=$("autoPushToggle");
-  if(apBtn) apBtn.addEventListener("click", async ()=>{
+  $("autoCommitToggle").addEventListener("change", async (ev)=>{
+    const val=ev.target.checked;
     try{await apiFetch("/api/orchestrator/state",{method:"PUT",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({autoPush:!apOn})});
-    showToast(apOn?"Auto-push disabled":"Auto-push enabled"); renderOrchestrator();}
-    catch(e){showToast("Failed to toggle auto-push",true);}
+      body:JSON.stringify({autoCommit:val})});
+    showToast(val?"Auto-commit enabled":"Auto-commit disabled"); renderOrchestrator();}
+    catch(e){ev.target.checked=!val;showToast("Failed to toggle auto-commit",true);}
+  });
+  const apChk=$("autoPushToggle");
+  if(apChk) apChk.addEventListener("change", async (ev)=>{
+    const val=ev.target.checked;
+    try{await apiFetch("/api/orchestrator/state",{method:"PUT",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({autoPush:val})});
+    showToast(val?"Auto-push enabled":"Auto-push disabled"); renderOrchestrator();}
+    catch(e){ev.target.checked=!val;showToast("Failed to toggle auto-push",true);}
   });
 
   const inbox=$("inbox");
@@ -1831,6 +2245,23 @@ function questionCard(t){
   card.appendChild(submit);
   return card;
 }
+</script>
+
+<script>
+// Ticket #66: keep the fixed-height layout in sync with the real top-bar height.
+// The bar is now allowed to wrap to a second row at narrow widths, so it is no
+// longer a constant 52px. Publish its measured height into --topbar-h; every
+// height/offset that used to hard-code 52px reads var(--topbar-h, 52px), so this
+// is a no-op enhancement (the 52px fallback holds if JS never runs).
+(function syncTopbarHeight(){
+  const bar = document.querySelector(".topbar");
+  if(!bar) return;
+  const apply = () => document.documentElement.style.setProperty(
+    "--topbar-h", Math.round(bar.getBoundingClientRect().height) + "px");
+  apply();
+  if(window.ResizeObserver){ new ResizeObserver(apply).observe(bar); }
+  else { window.addEventListener("resize", apply); }
+})();
 </script>
 </body>
 </html>

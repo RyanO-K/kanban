@@ -66,7 +66,7 @@ def _completed_task(kanban):
 def test_finish_completion_skips_all_git_when_autocommit_off(kanban, monkeypatch):
     oc.write_state(kanban, dict(oc.DEFAULT_STATE, autoCommit=False))
     monkeypatch.setattr(orch, "discover_changed_paths",
-                        lambda kd: [".AI-kanban/demo/1.json", "src/app.py"])
+                        lambda kd: [".kanban/demo/1.json", "src/app.py"])
     committed, published = [], []
     monkeypatch.setattr(orch, "commit_to_master",
                         lambda *a, **k: committed.append(a) or {"committed": True, "detail": ""})
@@ -87,7 +87,7 @@ def test_finish_completion_skips_all_git_when_autocommit_off(kanban, monkeypatch
 def test_finish_completion_commits_when_autocommit_on(kanban, monkeypatch):
     """Regression: the default (switch on) keeps the existing commit behaviour."""
     oc.write_state(kanban, dict(oc.DEFAULT_STATE))  # both on
-    monkeypatch.setattr(orch, "discover_changed_paths", lambda kd: [".AI-kanban/demo/1.json"])
+    monkeypatch.setattr(orch, "discover_changed_paths", lambda kd: [".kanban/demo/1.json"])
     committed = []
     monkeypatch.setattr(orch, "commit_to_master",
                         lambda kd, task, summary: committed.append(summary) or

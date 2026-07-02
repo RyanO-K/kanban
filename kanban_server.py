@@ -1,7 +1,7 @@
 ﻿#!/usr/bin/env python3
-"""Kanban board server — serves task boards from .AI-kanban/ as a kanban API.
+"""Kanban board server — serves task boards from .kanban/ as a kanban API.
 
-A *board* is a subdirectory of .AI-kanban/ that contains a `_meta.json` file.
+A *board* is a subdirectory of .kanban/ that contains a `_meta.json` file.
 The directory name is the board's slug (its identifier in the API). Inside:
 
     <slug>/
@@ -22,7 +22,7 @@ import threading
 import time
 from datetime import datetime, timezone, date
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse, unquote
+from urllib.parse import urlparse, unquote, parse_qs
 
 import orchestrator_core as _oc
 import perf_monitor
@@ -75,14 +75,18 @@ def allowed_origin(origin):
     return None
 
 
-# This script lives directly inside .AI-kanban/, so the board root is its own dir.
+# This script lives directly inside .kanban/, so the board root is its own dir.
 KANBAN_DIR = os.path.dirname(os.path.abspath(__file__))
 HTML_PATH = os.path.join(KANBAN_DIR, "kanban.html")
 META_FILE = "_meta.json"
-# Specs / plans live as markdown under .AI-kanban/docs/. A doc associates itself
-# with a ticket via a `**Ticket:** `.AI-kanban/<board>/<id>.json`` line in its header
+# Specs / plans live as markdown under .kanban/docs/. A doc associates itself
+# with a ticket via a `**Ticket:** `.kanban/<board>/<id>.json`` line in its header
 # (the convention used by the brainstorming/writing-plans skills).
 DOCS_DIR = os.path.join(KANBAN_DIR, "docs")
+# Per-run sub-agent stdout logs (stream-json) the orchestrator writes when it
+# dispatches a ticket. The live-logs endpoint reads from here and never escapes it.
+WORKSPACE_ROOT = os.path.dirname(KANBAN_DIR)
+RUNS_DIR = os.path.join(KANBAN_DIR, "_orchestrator", "runs")
 
 # Optional persisted bind config, so host/port can be set without env vars or
 # argv (e.g. when launched by the orchestrator/UI). Read in main() with safe
@@ -123,11 +127,12 @@ def load_server_config(path=None):
 # string is identical on every ticket; it points at the source-of-truth docs
 # rather than duplicating their prose. The backfill script imports this constant.
 KANBAN_GUIDE = (
-    "This is a .AI-kanban board ticket (file-based kanban). To learn how to use this "
-    "board, read .AI-kanban/CLAUDE.md (the agent guide: status values, history/session "
+    "This is a .kanban board ticket (file-based kanban). To learn how to use this "
+    "board, read .kanban/CLAUDE.md (the agent guide: status values, history/session "
     "conventions, server API) and this ticket's sibling _meta.json (project context). "
     "Tickets are JSON; agents read and edit them in place. "
-    "Reusable skills for board work live in .AI-kanban/skills/<skill-name>/SKILL.md; "
+    "Reusable skills for board work live in .kanban/skills/<skill-name>/SKILL.md "
+    "(e.g. create-promotion-prs for raising barnumHardis promotion PRs from the CLI); "
     "read the relevant SKILL.md before doing a task it covers."
 )
 
@@ -261,16 +266,16 @@ def write_ticket(path, task):
 
 # --- Spec / plan discovery --------------------------------------------------
 #
-# A spec or plan is a markdown file under .AI-kanban/docs/ that links itself to a
+# A spec or plan is a markdown file under .kanban/docs/ that links itself to a
 # ticket. The link is a header line of the form
-#     **Ticket:** `.AI-kanban/<board>/<id>.json`
+#     **Ticket:** `.kanban/<board>/<id>.json`
 # (the convention written by the brainstorming / writing-plans skills). We scan
 # docs/ once per board load, build a {board/id -> [docs]} index, and attach the
 # matching docs to each ticket as `_specs`. A ticket may also opt in explicitly
-# via a `spec` / `specs` field holding doc path(s) relative to .AI-kanban/.
+# via a `spec` / `specs` field holding doc path(s) relative to .kanban/.
 
 _TICKET_REF_RE = re.compile(
-    r"\*\*Ticket:\*\*\s*`?\.AI-kanban[\\/]([^\s`/\\]+)[\\/](\d+)\.json`?", re.IGNORECASE
+    r"\*\*Ticket:\*\*\s*`?\.kanban[\\/]([^\s`/\\]+)[\\/](\d+)\.json`?", re.IGNORECASE
 )
 # H1 markdown title, used as the doc's display label when present.
 _H1_RE = re.compile(r"^\s*#\s+(.+?)\s*#*\s*$")
@@ -319,7 +324,7 @@ def _doc_entry(abs_path, title=None):
 
 
 def build_spec_index():
-    """Map 'board/id' -> [doc descriptor, ...] by scanning .AI-kanban/docs/.
+    """Map 'board/id' -> [doc descriptor, ...] by scanning .kanban/docs/.
 
     Returns {} (and never raises) when docs/ is absent. Cheap enough to rebuild
     on each board poll; the doc tree is small and reads only file headers.
@@ -343,7 +348,7 @@ def attach_specs(task, slug, spec_index):
     """Attach a `_specs` list to *task* (specs auto-discovered + explicit refs).
 
     `slug` is the task's board. Explicit references come from a `spec`/`specs`
-    field holding a doc path (string or list) relative to .AI-kanban/. Discovered
+    field holding a doc path (string or list) relative to .kanban/. Discovered
     and explicit docs are merged, de-duplicated by path.
     """
     found = list(spec_index.get(f"{slug}/{task.get('id')}", []))
@@ -356,13 +361,13 @@ def attach_specs(task, slug, spec_index):
             if not isinstance(ref, str) or not ref.strip():
                 continue
             rel = ref.strip()
-            for prefix in (".AI-kanban/", ".AI-kanban\\"):
+            for prefix in (".kanban/", ".kanban\\"):
                 if rel.startswith(prefix):
                     rel = rel[len(prefix):]
                     break
             rel = rel.replace("\\", "/").lstrip("/")
             abs_path = os.path.normpath(os.path.join(KANBAN_DIR, rel))
-            # Confine explicit refs to the .AI-kanban/ tree.
+            # Confine explicit refs to the .kanban/ tree.
             if os.path.commonpath([abs_path, KANBAN_DIR]) != KANBAN_DIR:
                 continue
             norm_rel = os.path.relpath(abs_path, KANBAN_DIR).replace("\\", "/")
@@ -377,7 +382,7 @@ def attach_specs(task, slug, spec_index):
 
 
 def read_doc(rel_path):
-    """Return the raw text of a doc under .AI-kanban/docs/, or (None, status).
+    """Return the raw text of a doc under .kanban/docs/, or (None, status).
 
     Path is confined to the docs/ tree; anything escaping it is rejected.
     """
@@ -484,6 +489,7 @@ def load_board(slug):
         except (json.JSONDecodeError, OSError):
             continue
         task["_column"] = get_task_column(task.get("status", ""))
+        task["_board"] = safe
         task["_filePath"] = os.path.abspath(tp).replace("\\", "/")
         attach_specs(task, safe, spec_index)
         tasks.append(task)
@@ -589,12 +595,10 @@ def update_task_status(slug, task_id, new_column):
     if tp is None or not os.path.isfile(tp):
         return {"error": f"task {task_id} not found"}, 404
 
-    entry = {
-        "action": "status_change",
-        "from": None,  # filled from the fresh read below
-        "to": COLUMN_STATUS[new_column],
-        "timestamp": now_iso(),
-    }
+    # Capture the timestamp BEFORE re-reading: tests (and real concurrent writers)
+    # use the now_iso() call as a hook to inject a concurrent on-disk write. By
+    # calling it first we guarantee the re-read that follows picks up those writes.
+    ts = now_iso()
 
     # Re-read the ticket fresh immediately before writing and apply only the
     # fields we own (status + a history entry). Reading the whole object,
@@ -607,8 +611,21 @@ def update_task_status(slug, task_id, new_column):
     except (json.JSONDecodeError, OSError) as e:
         return {"error": str(e)}, 500
 
-    entry["from"] = task.get("status", "todo")
-    task["status"] = COLUMN_STATUS[new_column]
+    old_status = task.get("status", "todo")
+    new_status = COLUMN_STATUS[new_column]
+    entry = {
+        "action": "status_change",
+        "from": old_status,
+        "to": new_status,
+        "timestamp": ts,
+    }
+
+    # UI-based session management (ticket #44):
+    # Moving OUT of in_progress while a session is live → kill it first.
+    if old_status == "in_progress" and new_status != "in_progress":
+        _ui_kill_session(KANBAN_DIR, slug, task)
+
+    task["status"] = new_status
     task.setdefault("history", []).append(entry)
 
     try:
@@ -617,7 +634,69 @@ def update_task_status(slug, task_id, new_column):
         return {"error": str(e)}, 500
     touch_meta(path)
 
-    return {"ok": True, "taskId": task_id, "newStatus": COLUMN_STATUS[new_column]}, 200
+    # Moving INTO in_progress and not already in-flight → spawn a session.
+    if new_status == "in_progress" and old_status != "in_progress":
+        if not _oc.is_in_flight(task):
+            marker = _ui_dispatch_session(KANBAN_DIR, slug, task)
+            if marker:
+                # Re-read to pick up any write the spawn itself may have done,
+                # then apply only the fields we own (marker + sessionId).
+                try:
+                    with open(tp, "r", encoding="utf-8") as f:
+                        task = json.load(f)
+                except (json.JSONDecodeError, OSError):
+                    pass
+                _oc.set_marker(task, marker)
+                if marker.get("sessionId"):
+                    task["claudeSessionId"] = marker["sessionId"]
+                if marker.get("logFile"):
+                    task["runLogFile"] = marker["logFile"]
+                try:
+                    write_ticket(tp, task)
+                except OSError:
+                    pass
+                touch_meta(path)
+                _oc.append_activity(KANBAN_DIR, {
+                    "ts": now_iso(), "kind": "dispatch", "board": slug,
+                    "ticket": task_id, "profile": marker.get("profile"),
+                    "model": marker.get("model"), "reason": "ui-drag",
+                })
+
+    return {"ok": True, "taskId": task_id, "newStatus": new_status}, 200
+
+
+def update_task_order(slug, task_id, order):
+    """Set a ticket's top-level "order" field (integer priority within its column).
+    Lower order = higher priority. Mirrors the re-read-before-write pattern."""
+    path, _ = board_dir(slug)
+    if path is None or not is_board(path):
+        return {"error": "board not found"}, 404
+
+    tp = ticket_path(path, task_id)
+    if tp is None or not os.path.isfile(tp):
+        return {"error": f"task {task_id} not found"}, 404
+
+    try:
+        with open(tp, "r", encoding="utf-8") as f:
+            task = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        return {"error": str(e)}, 500
+
+    if order is None:
+        task.pop("order", None)
+    else:
+        try:
+            task["order"] = int(order)
+        except (TypeError, ValueError):
+            return {"error": "order must be an integer"}, 400
+
+    try:
+        write_ticket(tp, task)
+    except OSError as e:
+        return {"error": str(e)}, 500
+    touch_meta(path)
+
+    return {"ok": True, "taskId": task_id, "order": order}, 200
 
 
 def update_task_model(slug, task_id, model):
@@ -697,7 +776,7 @@ def create_task(slug, payload):
         new_task["optional"] = True
 
     model = (payload.get("model") or "").strip()
-    if model and model in MODEL_VALUES:
+    if model:
         new_task["model"] = model
 
     tp = ticket_path(path, new_id)
@@ -905,6 +984,91 @@ def _ticket_file(board, task_id):
     return os.path.join(KANBAN_DIR, bsafe, isafe)
 
 
+# --- Live logs -------------------------------------------------------------
+
+# How many bytes from the END of a run-log we read each poll. The log is
+# stream-json (one JSON object per line) and can grow to hundreds of KB; we only
+# render the last handful of turns, so reading the whole file every 2s is wasteful.
+_LOG_TAIL_BYTES = 256 * 1024
+# Re-export the preview cap and parsing helpers from orchestrator_core so existing
+# tests that reference `ks._TOOL_RESULT_PREVIEW` and `ks.parse_log_turns` still work.
+# (parse_log_turns moved to orchestrator_core in #58; it carries the #45 tool_use_id
+# result-matching and the #57 per-turn timestamp.)
+from orchestrator_core import (  # noqa: E402
+    _TOOL_RESULT_PREVIEW,
+    _tool_summary,
+    _result_preview,
+    parse_log_turns,
+)
+
+
+def _resolve_run_log(log_file):
+    """Map a ticket's `orchestrator.logFile` to an absolute path INSIDE runs/.
+
+    `logFile` is stored relative to the workspace root (parent of .kanban), e.g.
+    `.kanban/_orchestrator/runs/45-….log`. Returns the absolute path only if it
+    stays within RUNS_DIR; anything escaping it (traversal) returns None.
+    """
+    if not log_file:
+        return None
+    rel = str(log_file).replace("\\", "/").lstrip("/")
+    abs_path = os.path.normpath(os.path.join(WORKSPACE_ROOT, rel))
+    try:
+        if os.path.commonpath([abs_path, RUNS_DIR]) != RUNS_DIR:
+            return None
+    except ValueError:
+        return None  # different drives on Windows, etc.
+    return abs_path
+
+
+def task_log(board, task_id, n=20):
+    """Return the recent agent turns for a ticket's current run-log.
+
+    Shape: {turns, running, hasLog, status}. Never errors on a missing log — an
+    absent/not-yet-dispatched ticket simply has hasLog=false and no turns.
+
+    For completed tickets, falls back to the `completedLog` field saved on the
+    ticket at completion time (ticket #58) when the live log file is absent or
+    inaccessible.
+    """
+    path = _ticket_file(board, task_id)
+    if path is None or not os.path.isfile(path):
+        return {"error": "not found"}, 404
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            task = json.load(f)
+    except (OSError, ValueError):
+        return {"error": "could not read ticket"}, 500
+    marker = task.get("orchestrator") or {}
+    status = task.get("status", "")
+    running = marker.get("state") == "dispatched" and status == "in_progress"
+
+    # For a done ticket that has a saved completedLog, return it directly without
+    # needing the (possibly deleted/archived) run-log file.
+    if status in ("completed", "done") and isinstance(task.get("completedLog"), list):
+        turns = task["completedLog"]
+        if n and len(turns) > n:
+            turns = turns[-n:]
+        return {"turns": turns, "running": False, "hasLog": True, "status": status}, 200
+
+    # Fall back to top-level runLogFile when the marker is absent (cleared after reap).
+    log_path = _resolve_run_log(marker.get("logFile") or task.get("runLogFile"))
+    if log_path is None:
+        # No marker / no log yet, or a path escaping runs/ — show empty state.
+        return {"turns": [], "running": running, "hasLog": False, "status": status}, 200
+    try:
+        size = os.path.getsize(log_path)
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            if size > _LOG_TAIL_BYTES:
+                f.seek(size - _LOG_TAIL_BYTES)
+                f.readline()  # drop the partial first line after the seek
+            text = f.read()
+    except OSError:
+        return {"turns": [], "running": running, "hasLog": True, "status": status}, 200
+    turns = parse_log_turns(text, n)
+    return {"turns": turns, "running": running, "hasLog": True, "status": status}, 200
+
+
 def orch_kill(board, task_id):
     path = _ticket_file(board, task_id)
     if path is None or not os.path.isfile(path):
@@ -966,15 +1130,25 @@ def orch_answer(board, task_id, payload):
 # --- Performance monitor ----------------------------------------------------
 
 def _owned_pids():
-    """PIDs the orchestrator spawned, for owned/external tagging."""
+    """PIDs the orchestrator owns: ticket agents (_PROCS) + server background ops (_SERVER_OPS)."""
     try:
         import orchestrator as _orch
-        return set(_orch._PROCS.keys())
+        return set(_orch._PROCS.keys()) | set(_orch._SERVER_OPS.keys())
     except Exception:
         return set()
 
 
-_PERF_SAMPLER = perf_monitor.PerfSampler(owned_pids_fn=_owned_pids)
+def _server_op_labels():
+    """Label map for server-owned background processes (triage, summarize)."""
+    try:
+        import orchestrator as _orch
+        return dict(_orch._SERVER_OPS)
+    except Exception:
+        return {}
+
+
+_PERF_SAMPLER = perf_monitor.PerfSampler(owned_pids_fn=_owned_pids,
+                                          labels_fn=_server_op_labels)
 
 
 def ensure_perf_sampler_running():
@@ -996,6 +1170,134 @@ def perf_kill(pid_str):
     return perf_monitor.kill_session(pid), 200
 
 
+# --- UI-based session management (ticket #44) --------------------------------
+#
+# Dragging a ticket to in_progress via the UI should behave exactly like the
+# orchestrator picking it up: spawn a headless `claude -p` sub-agent, write the
+# orchestrator marker + claudeSessionId, and log to the activity feed. Dragging
+# it back out should kill the agent, write an Opus-generated progress summary,
+# clear the marker, and log the kill.
+#
+# Both seams (_ui_summarize_progress, _ui_dispatch_session, _ui_kill_session)
+# are exposed as module-level names so tests can monkeypatch them.
+
+
+def _ui_summarize_progress(kanban_dir, task, reason):
+    """Summarise an in-flight agent's progress before a UI-triggered kill.
+
+    Delegates to the real orchestrator summarizer. Exposed as a module-level
+    name so tests can monkeypatch it without touching orchestrator internals.
+    """
+    import orchestrator as _orch
+    return _orch._summarize_progress(kanban_dir, task, reason)
+
+
+def _ui_dispatch_session(kanban_dir, slug, task):
+    """Spawn a sub-agent for a ticket moved to in_progress from the UI.
+
+    Picks the best-fit profile (first profile with a whenToUse, else first
+    profile — same heuristic as backfill_dispatch). No-ops silently when
+    there are no profiles so a board with no profiles still allows manual drags.
+    Returns the marker dict on success, or None when no profile is available.
+    """
+    import orchestrator as _orch
+    profiles = _oc.list_profiles(kanban_dir)
+    if not profiles:
+        return None
+    profile = next((p for p in profiles if p.get("whenToUse")), profiles[0])
+    model = task.get("model") or profile.get("model")
+    try:
+        return _orch.spawn_agent(kanban_dir, slug, task, profile, model)
+    except Exception as e:
+        _oc.append_activity(kanban_dir, {
+            "ts": now_iso(), "kind": "error", "board": slug,
+            "ticket": task.get("id"), "message": f"ui spawn failed: {e}",
+        })
+        return None
+
+
+def _ui_kill_session(kanban_dir, slug, task):
+    """Kill the sub-agent for a ticket moved out of in_progress from the UI.
+
+    Summarises progress first (so the kill leaves a resumable checkpoint),
+    kills the process, writes the summary as a comment, clears the marker,
+    and logs to the activity feed. No-ops when there is no dispatched marker.
+    Mutates *task* in place (comments + orchestrator). Caller is responsible
+    for writing the task to disk.
+    """
+    import orchestrator as _orch
+    marker = _oc.get_marker(task)
+    if not marker or marker.get("state") != "dispatched":
+        return
+    pid = marker.get("pid")
+    summary = _ui_summarize_progress(kanban_dir, task, "kill")
+    task.setdefault("comments", []).append({
+        "writer": "Orchestrator",
+        "message": f"Killed by UI drag.\n{summary}",
+        "timestamp": now_iso(),
+    })
+    if pid:
+        _orch.kill_pid(pid)
+    _oc.clear_marker(task)
+    _oc.append_activity(kanban_dir, {
+        "ts": now_iso(), "kind": "kill", "board": slug,
+        "ticket": task.get("id"), "reason": "ui-drag",
+    })
+
+
+# --- Nudge: immediate tick trigger ------------------------------------------
+
+def _nudge_opus_triage(prompt, eligible, profiles, free):
+    """Triage callable used by the nudge tick.
+
+    Reads triageModel and triageTimeoutSeconds fresh so live config changes
+    take effect, then delegates to the real Opus call. Exposed as a module-level
+    name so tests can monkeypatch it without touching orchestrator internals.
+    """
+    import orchestrator as _orch
+    state = _oc.read_state(KANBAN_DIR)
+    model = state.get("triageModel") or _oc.DEFAULT_LOOP_MODEL
+    timeout = state.get("triageTimeoutSeconds") or 120
+    return _orch._real_opus_triage(prompt, eligible, profiles, free,
+                                   model=model, timeout=timeout)
+
+
+def _nudge_initial_triage(kanban_dir, task, all_tasks):
+    """Initial-triage callable used by the nudge tick.
+
+    Delegates to the real Sonnet triage. Exposed as a module-level name so
+    tests can monkeypatch it without touching orchestrator internals.
+    """
+    import orchestrator as _orch
+    return _orch._real_sonnet_triage(kanban_dir, task, all_tasks)
+
+
+def orch_nudge():
+    """Trigger an immediate orchestrator tick in a background daemon thread.
+
+    The nudge does not wait for the tick to complete — it queues it and returns
+    immediately so the HTTP response is not held open for the full tick duration
+    (which can be tens of seconds when triage calls Opus). The tick uses the
+    same `_nudge_opus_triage` and `_nudge_initial_triage` seams so tests can
+    stub them out.
+    """
+    import orchestrator as _orch
+
+    def _run():
+        try:
+            _orch.tick(KANBAN_DIR, opus_triage=_nudge_opus_triage,
+                       initial_triage=_nudge_initial_triage)
+        except Exception as e:
+            _oc.append_activity(KANBAN_DIR, {
+                "ts": now_iso(), "kind": "error",
+                "message": f"nudge tick failed: {e}",
+            })
+
+    t = threading.Thread(target=_run, name="nudge-tick", daemon=True)
+    t.start()
+    return {"ok": True, "queued": True}, 200
+
+
 class KanbanHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
@@ -1004,6 +1306,20 @@ class KanbanHandler(BaseHTTPRequestHandler):
 
         if path == "/api/files":
             self._json(scan_boards())
+        # GET /api/board/<slug>/task/<id>/log[?n=] — recent agent turns (live logs)
+        elif path.startswith("/api/board/") and path.endswith("/log"):
+            parts = path.split("/")
+            if len(parts) == 7 and parts[4] == "task":
+                slug = unquote(parts[3])
+                task_id = unquote(parts[5])
+                qs = parse_qs(parsed.query)
+                try:
+                    n = max(1, min(100, int(qs.get("n", ["20"])[0])))
+                except (ValueError, TypeError):
+                    n = 20
+                self._json(*task_log(slug, task_id, n))
+            else:
+                self.send_error(404)
         elif path.startswith("/api/board/"):
             slug = unquote(path[len("/api/board/"):])
             data, status = load_board(slug)
@@ -1088,6 +1404,8 @@ class KanbanHandler(BaseHTTPRequestHandler):
                 return
             if "model" in payload:
                 result, status = update_task_model(slug, task_id, payload.get("model", ""))
+            elif "order" in payload:
+                result, status = update_task_order(slug, task_id, payload.get("order"))
             else:
                 result, status = update_task_status(slug, task_id, payload.get("column", ""))
             self._json(result, status)
@@ -1128,6 +1446,10 @@ class KanbanHandler(BaseHTTPRequestHandler):
             if payload is None:
                 return
             self._json(*orch_answer(unquote(parts[4]), unquote(parts[5]), payload))
+
+        # POST /api/orchestrator/nudge — immediate tick
+        elif len(parts) == 4 and parts[1] == "api" and parts[2] == "orchestrator" and parts[3] == "nudge":
+            self._json(*orch_nudge())
 
         # POST /api/server/restart
         elif len(parts) == 4 and parts[1] == "api" and parts[2] == "server" and parts[3] == "restart":

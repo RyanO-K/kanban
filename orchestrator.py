@@ -24,6 +24,11 @@ SKIP_DIRS = {"config", "_orchestrator", "__pycache__", "tests"}
 # Maps pid (int) -> Popen so we can read real exit codes on reap.
 _PROCS = {}
 
+# Registry of short-lived server background ops (triage, summarize).
+# Maps pid (int) -> label string. Populated while subprocess.run() blocks so
+# the Performance tab can show what the server is doing. Cleared on return.
+_SERVER_OPS = {}
+
 
 # --- ticket IO across boards ---
 
@@ -207,6 +212,45 @@ def _release_proc(pid):
                 pass
 
 
+def _run_tracked(cmd, label, **run_kwargs):
+    """Run a subprocess while registering its PID in _SERVER_OPS.
+
+    This lets the Performance tab show what the server is doing during blocking
+    LLM calls (triage, summarize). The PID is registered before the call and
+    removed on return. Best-effort: any Popen failure falls back to
+    subprocess.run() without tracking.
+    """
+    # Translate subprocess.run() convenience flag to Popen-compatible form.
+    popen_kwargs = {k: v for k, v in run_kwargs.items() if k not in ("timeout",)}
+    if popen_kwargs.pop("capture_output", False):
+        popen_kwargs["stdout"] = subprocess.PIPE
+        popen_kwargs["stderr"] = subprocess.PIPE
+    timeout = run_kwargs.get("timeout")
+    try:
+        proc = subprocess.Popen(cmd, **popen_kwargs)
+        _SERVER_OPS[proc.pid] = label
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            raise subprocess.TimeoutExpired(cmd, timeout)
+        finally:
+            _SERVER_OPS.pop(proc.pid, None)
+
+        class _Result:
+            pass
+        result = _Result()
+        result.returncode = proc.returncode
+        result.stdout = stdout
+        result.stderr = stderr
+        return result
+    except (OSError, ValueError):
+        # Popen failed entirely — fall back to subprocess.run without tracking.
+        _SERVER_OPS.clear()  # defensive: don't leave stale entries
+        return subprocess.run(cmd, **run_kwargs)
+
+
 def _exit_code(pid):
     """Return the true exit code for a dead process we spawned.
 
@@ -233,9 +277,9 @@ def _exit_code(pid):
 # --- output-branch publishing (mockable seams) ---
 
 def _repo_root(kanban_dir):
-    """The workspace root: the parent of .AI-kanban.
+    """The workspace root: the parent of .kanban.
 
-    NOTE: this directory is NOT itself a git repo — each repo is either `.AI-kanban`
+    NOTE: this directory is NOT itself a git repo — each repo is either `.kanban`
     itself or a sibling sub-directory (a checked-out Salesforce repo, etc.). It is
     only the fallback cwd when the changed files don't identify a single repo; the
     actual commit/publish cwd is `repo_dir_for_paths`.
@@ -251,9 +295,9 @@ def repo_dir_for_paths(kanban_dir, paths):
     derive the repo from the changed files (paths are workspace-root-relative, as
     `git status --porcelain` would report them relative to the root):
 
-      - All under `.AI-kanban/`  -> the `.AI-kanban` directory (its own repo; this is the
+      - All under `.kanban/`  -> the `.kanban` directory (its own repo; this is the
         "kanban lives on master" tree).
-      - All under one sibling top-level dir (e.g. `subrepo/...`) -> that
+      - All under one sibling top-level dir (e.g. `barnumHardis2/...`) -> that
         sub-repo's directory: we `cd` into the checked-out repo and commit there.
       - Empty, or spanning two different sub-repos (can't pick one) -> fall back to
         the workspace root (prior behavior; the best-effort git call just no-ops on
@@ -271,7 +315,7 @@ def repo_dir_for_paths(kanban_dir, paths):
     if len(tops) != 1:
         return root  # nothing changed, or multiple repos — can't pick one
     top = tops.pop()
-    if top == ".AI-kanban":
+    if top == ".kanban":
         return kanban_dir
     return os.path.join(root, top)
 
@@ -282,7 +326,7 @@ def repo_root_for_board(kanban_dir, board_meta):
     Ticket #40: the Project Settings page sets a per-project `directory`; that
     directory IS the project's git repo and is the repo root for worktree creation
     and commits. When unset (or missing on disk) we fall back to the workspace root
-    (parent of .AI-kanban), preserving the multi-sibling-repo discovery behavior.
+    (parent of .kanban), preserving the multi-sibling-repo discovery behavior.
     """
     directory = (board_meta or {}).get("directory")
     if directory and os.path.isdir(directory):
@@ -312,6 +356,23 @@ def _is_worktree_dir(path):
     return (os.path.basename(parent) == "worktrees"
             and os.path.basename(os.path.dirname(parent)) == ".claude"
             and os.path.basename(path).startswith("ticket-"))
+
+
+def find_relative_worktree(repo_root, name):
+    """Search .claude/worktrees/ for a worktree matching the given name, returning its path or None.
+
+    Ticket #49: the kanban can now discover and reuse worktrees that are placed with
+    relative directory names (e.g. `.claude/worktrees/fix-resilience-tests`) rather than
+    the standard `ticket-<id>` format. This allows agents to work in pre-existing worktrees
+    that may be set up externally or for ongoing projects.
+    """
+    worktree_root = os.path.join(os.path.abspath(repo_root), ".claude", "worktrees")
+    if not os.path.isdir(worktree_root):
+        return None
+    target = os.path.join(worktree_root, name)
+    if os.path.isdir(target):
+        return target
+    return None
 
 
 def _is_git_repo(path):
@@ -346,7 +407,7 @@ def _ticket_branch_in_repo(repo_dir, task):
 
 
 def _repo_with_ticket_branch(kanban_dir, task):
-    """A workspace repo (sibling dir or `.AI-kanban`) that already holds the ticket's
+    """A workspace repo (sibling dir or `.kanban`) that already holds the ticket's
     committed branch, else None.
 
     The recovery for a clean working tree: change discovery finds nothing (the agent
@@ -370,9 +431,11 @@ def _repo_with_ticket_branch(kanban_dir, task):
 def commit_cwd_for_task(kanban_dir, task, board_meta):
     """The directory git must run in to capture a ticket's working-tree output.
 
-    Resolution order (ticket #40):
+    Resolution order (ticket #40, #49):
       1. If the board uses worktrees and the ticket's worktree exists, that worktree
          — it holds the agent's checked-out branch + changes — is where git runs.
+      1b. If using worktrees, also search for a relative worktree by the ticket's title
+          (ticket #49: allows reusing pre-existing worktrees like `.claude/worktrees/fix-resilience-tests`).
       2. Else the configured project `directory` (the repo root), if set on disk.
       3. Else the legacy discover/`repo_dir_for_paths` pipeline (multi-sibling-repo
          workspace with no per-project directory configured).
@@ -388,6 +451,11 @@ def commit_cwd_for_task(kanban_dir, task, board_meta):
         wt = worktree_path(root, task)
         if os.path.isdir(wt):
             return wt
+        title = (task or {}).get("title", "").strip()
+        if title:
+            relative_wt = find_relative_worktree(root, title)
+            if relative_wt:
+                return relative_wt
     directory = (board_meta or {}).get("directory")
     if directory and os.path.isdir(directory):
         return root
@@ -481,6 +549,31 @@ def publish_output_branch(kanban_dir, task, branch, board_meta=None, push=True):
     cwd = commit_cwd_for_task(kanban_dir, task, board_meta)
     msg = f"ticket #{task.get('id')}: {task.get('title','')}"
     try:
+        # Worktree boards must NEVER be published in place: checking out a ticket
+        # branch in the configured repo root moves that root off its default branch
+        # (the exact failure this guard prevents — the root must always stay on its
+        # default branch). When the board uses worktrees but no worktree was found
+        # (the agent worked in place instead of creating one), do NOT `git checkout`
+        # in the root. If the agent's work is already committed on a ticket branch,
+        # push that branch ref WITHOUT checking it out (a refspec push needs no
+        # checkout); otherwise report the misconfiguration rather than touching HEAD.
+        if oc.use_worktrees(board_meta) and not _is_worktree_dir(cwd):
+            existing = _ticket_branch_in_repo(cwd, task)
+            if not existing:
+                return {"branch": branch, "pushed": False,
+                        "detail": ("worktree board but no worktree and no committed "
+                                   "ticket branch found — refusing to check out in the "
+                                   "repo root (would move it off its default branch). "
+                                   "The agent should create a worktree for its changes.")}
+            if not push:
+                return {"branch": existing, "pushed": False,
+                        "detail": ("worktree board; ticket branch exists in repo root — "
+                                   "not checking it out (would move root off default "
+                                   "branch). Push skipped.")}
+            # Push the branch ref directly; no checkout, so the root's HEAD is untouched.
+            _run_git(["push", "-u", "origin", f"{existing}:{existing}"], cwd=cwd)
+            return {"branch": existing, "pushed": True,
+                    "detail": f"pushed to origin/{existing} (ref-only, root HEAD untouched)"}
         if _is_worktree_dir(cwd):
             # The agent's worktree already has its branch checked out — publish it
             # as-is. Read the actual branch name so the ticket records where the
@@ -509,18 +602,19 @@ def publish_output_branch(kanban_dir, task, branch, board_meta=None, push=True):
         # branch exists (the agent left uncommitted changes). (Ticket #39.)
         existing = _ticket_branch_in_repo(cwd, task)
         if existing:
-            try:
-                _run_git(["checkout", existing], cwd=cwd)
-            except subprocess.CalledProcessError:
-                pass
-            _run_git(["add", "-A"], cwd=cwd)
-            try:
-                _run_git(["commit", "-m", msg], cwd=cwd)
-            except subprocess.CalledProcessError:
-                pass  # nothing new beyond what the agent already committed
+            # Publish the committed branch WITHOUT checking it out. `cwd` is a SHARED
+            # repo (the `.kanban` repo or a checked-out sibling) that a human may be
+            # using; `git checkout <existing>` would yank their working tree's HEAD
+            # onto the ticket branch (ticket #48 saw HEAD flipped master <->
+            # 40-Nudge-Dispatcher ~15 times). `git push` of a local ref does not
+            # need that ref checked out, so push it directly and leave HEAD put.
+            # The agent already committed its work on `existing` (clean tree, per the
+            # CLAUDE.md commit-before-finish contract), so there is nothing local to
+            # fold in — any uncommitted changes belong to the current HEAD, not to
+            # `existing`, and must not be force-committed onto it.
             if not push:
                 return {"branch": existing, "pushed": False,
-                        "detail": "committed locally; push skipped"}
+                        "detail": "branch committed by agent; push skipped"}
             _run_git(["push", "-u", "origin", existing], cwd=cwd)
             return {"branch": existing, "pushed": True,
                     "detail": f"pushed to origin/{existing}"}
@@ -584,7 +678,7 @@ def changed_paths(cwd):
 def discover_changed_paths(kanban_dir):
     """Workspace-root-relative changed paths across every repo under the workspace.
 
-    The workspace root is NOT a single git repo — `.AI-kanban` and each sibling
+    The workspace root is NOT a single git repo — `.kanban` and each sibling
     top-level directory is an independent repo (a checked-out Salesforce repo, etc.).
     A plain `git status` at the root therefore reports nothing. So we ask each
     candidate repo directly and prefix its `git status --porcelain` paths with the
@@ -593,7 +687,7 @@ def discover_changed_paths(kanban_dir):
     already expects. Best-effort: non-repo / unreadable dirs are skipped silently.
     """
     root = _repo_root(kanban_dir)
-    kanban_name = os.path.basename(os.path.abspath(kanban_dir))  # ".AI-kanban"
+    kanban_name = os.path.basename(os.path.abspath(kanban_dir))  # ".kanban"
     out = []
     try:
         entries = sorted(os.listdir(root))
@@ -605,22 +699,22 @@ def discover_changed_paths(kanban_dir):
             continue  # only directories that are git repos
         for rel in changed_paths(sub):
             out.append(f"{name}/{rel}")
-    # `os.path.basename(.AI-kanban)` is ".AI-kanban"; its changes are reported as
-    # ".AI-kanban/<rel>", matching changes_are_kanban_only's prefix check.
+    # `os.path.basename(.kanban)` is ".kanban"; its changes are reported as
+    # ".kanban/<rel>", matching changes_are_kanban_only's prefix check.
     return out
 
 
 def changes_are_kanban_only(paths):
-    """True iff there is at least one change and every changed path is under `.AI-kanban/`.
+    """True iff there is at least one change and every changed path is under `.kanban/`.
 
     This is the deterministic trigger for committing to master rather than cutting an
-    isolated ticket branch: CLAUDE.md mandates that `.AI-kanban/` files always land on
+    isolated ticket branch: CLAUDE.md mandates that `.kanban/` files always land on
     master and only non-kanban source needs a branch. An empty change set is False
     (nothing to commit — neither path applies).
     """
     if not paths:
         return False
-    return all(p.replace("\\", "/").startswith(".AI-kanban/") for p in paths)
+    return all(p.replace("\\", "/").startswith(".kanban/") for p in paths)
 
 
 def commit_to_master(kanban_dir, task, summary):
@@ -655,7 +749,7 @@ def _finish_completion(kanban_dir, task):
     """Decide how a completed ticket's output is recorded: auto-commit to master for
     kanban-only work, else the existing isolated-branch publish.
 
-    Kanban-board work (changes entirely under `.AI-kanban/`) is committed directly to
+    Kanban-board work (changes entirely under `.kanban/`) is committed directly to
     master with a summary, gated by the board's `commitRequirements` (the agent's
     `commitGate` report). Everything else keeps the isolated `ticket/<id>-<slug>`
     branch flow unchanged. Every outcome is recorded in a comment for the human.
@@ -765,8 +859,8 @@ def spawn_agent(kanban_dir, board, task, profile, model):
     log_name = f"{task['id']}-{ts}.log"
     log_path = os.path.join(runs_dir, log_name)
 
-    # The sub-agent runs from the repo root (parent of .AI-kanban) so it can see
-    # the .AI-kanban/<board>/<id>.json paths in its prompt. Fall back to the
+    # The sub-agent runs from the repo root (parent of .kanban) so it can see
+    # the .kanban/<board>/<id>.json paths in its prompt. Fall back to the
     # kanban dir itself if there is no parent.
     cwd = os.path.dirname(kanban_dir) or kanban_dir
 
@@ -802,9 +896,10 @@ def spawn_agent(kanban_dir, board, task, profile, model):
         "model": model,
         "pid": proc.pid,
         "sessionId": session_id,
+        "cwd": cwd,
         "dispatchedAt": oc.now_iso(),
         "killRequested": False,
-        "logFile": f".AI-kanban/_orchestrator/runs/{log_name}",
+        "logFile": f".kanban/_orchestrator/runs/{log_name}",
     }
 
 
@@ -839,7 +934,7 @@ def _git_workflow_guidance(task, board_meta):
     Two things the agent must get right when it might be in a git worktree:
 
     - **Board path anchoring:** a worktree moves the agent's cwd away from the
-      workspace root, so a cwd-relative `.AI-kanban/...` path no longer resolves. The
+      workspace root, so a cwd-relative `.kanban/...` path no longer resolves. The
       agent must read/edit its ticket JSON, `_meta.json`, and skills via ABSOLUTE
       paths (the ticket file above is absolute).
     - **Worktree vs in place:** the board's `useWorktrees` flag decides whether the
@@ -851,8 +946,8 @@ def _git_workflow_guidance(task, board_meta):
     board_anchor = (
         "\nBOARD PATH: a git worktree moves your working directory away from the "
         "workspace root, so always read and edit your ticket JSON, `_meta.json`, and "
-        "any `.AI-kanban/` skills via their ABSOLUTE paths (your ticket file path above "
-        "is absolute) — never a cwd-relative `.AI-kanban/...` path."
+        "any `.kanban/` skills via their ABSOLUTE paths (your ticket file path above "
+        "is absolute) — never a cwd-relative `.kanban/...` path."
     )
     if oc.use_worktrees(board_meta):
         wt = f".claude/worktrees/ticket-{task.get('id')}"
@@ -862,10 +957,12 @@ def _git_workflow_guidance(task, board_meta):
                 f"prefer it; otherwise run `git worktree add {wt} -b <id>-Feature-Name` "
                 "from the repo root (ensure `.claude/worktrees/` is gitignored). Commit "
                 "your changes in the worktree when done.")
+    repo_loc = f" Work in `{directory}`." if directory else ""
     return (board_anchor +
-            "\nGIT WORKFLOW: this project does NOT use worktrees — work in place on a "
-            f"branch. Run `git checkout -b <id>-Feature-Name` in the repo root{repo_hint} "
-            "and commit there when done. Do NOT create a git worktree.")
+            "\nGIT WORKFLOW: this project does not use worktrees — work directly on the "
+            f"main branch (master/main/production) in the repo root.{repo_loc}{repo_hint} "
+            "Do NOT create a git worktree and do NOT create a new branch — commit your "
+            "changes directly on the existing default branch.")
 
 
 # Commit-gate guidance. When a board sets `commitRequirements` (a natural-language
@@ -926,6 +1023,28 @@ _HUMAN_INPUT_GUIDANCE = (
 
 # --- the tick ---
 
+def _save_completed_log(kanban_dir, task):
+    """Parse the run-log and save all turns to the ticket as `completedLog`.
+
+    Called immediately before the orchestrator clears the marker on a completed
+    ticket so the log turns survive even after the log file is deleted or
+    archived.  Best-effort: a missing/unreadable log is silently ignored and
+    `completedLog` is left absent (callers must not depend on its presence).
+    """
+    marker = oc.get_marker(task) or {}
+    log_rel = marker.get("logFile") or task.get("runLogFile") or ""
+    if not log_rel:
+        return
+    log_path = os.path.join(kanban_dir, "..", log_rel)
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return
+    turns = oc.parse_log_turns(text, n=0)  # n=0 means all turns
+    task["completedLog"] = turns
+
+
 def _free_log_tail(path, n=20):
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -977,9 +1096,10 @@ def _summarize_progress(kanban_dir, task, reason):
     state = oc.read_state(kanban_dir)
     model = state.get("summarizerModel") or oc.DEFAULT_LOOP_MODEL
     timeout = state.get("triageTimeoutSeconds") or 120
+    label = f"Summarizing ticket #{task.get('id', '?')} ({reason})"
     try:
-        out = subprocess.run(["claude", "-p", prompt, "--model", model],
-                             capture_output=True, text=True, timeout=timeout)
+        out = _run_tracked(["claude", "-p", prompt, "--model", model], label,
+                           capture_output=True, text=True, timeout=timeout)
         summary = (out.stdout or "").strip()
         if summary:
             return summary
@@ -996,11 +1116,11 @@ def _summarize_progress(kanban_dir, task, reason):
             + (comments or "(none)"))
 
 
-def tick(kanban_dir, *, opus_triage, summarize_progress=None):
+def tick(kanban_dir, *, opus_triage, summarize_progress=None, initial_triage=None):
     """One orchestrator tick: reap in-flight agents, then dispatch eligible tickets.
 
     Args:
-        kanban_dir: path to the .AI-kanban directory.
+        kanban_dir: path to the .kanban directory.
         opus_triage: callable(prompt, eligible, profiles, free) -> dict used to
             pick which tickets to dispatch and with which profiles.
         summarize_progress: optional callable(kanban_dir, task, reason) -> str.
@@ -1008,14 +1128,24 @@ def tick(kanban_dir, *, opus_triage, summarize_progress=None):
             interprets the agent's log + ticket into a "last known checkpoint +
             next steps" comment so the kill leaves a resumable record.  Defaults
             to `_summarize_progress`; injectable so tests don't spawn a model.
+        initial_triage: optional callable(kanban_dir, task, all_tasks) -> dict.
+            Called for each ticket being promoted from todo to ready. The dict
+            may contain `dependsOn` (list) and/or `model` (str), which are
+            written to the ticket before promotion. Defaults to
+            `_real_sonnet_triage`; injectable so tests don't call Claude.
+            Any exception from this callable is swallowed — a triage failure
+            must never block promotion.
     """
     if summarize_progress is None:
         summarize_progress = _summarize_progress
+    if initial_triage is None:
+        initial_triage = _real_sonnet_triage
     state = oc.read_state(kanban_dir)
     tasks = load_all_tasks(kanban_dir)
 
     # 1. Stop-all.
     if state.get("stopAllRequested"):
+        print(f"[{oc.now_iso()}] Block: stop-all processing initiated")
         for t in tasks:
             m = oc.get_marker(t)
             if m and m.get("state") == "dispatched":
@@ -1039,10 +1169,31 @@ def tick(kanban_dir, *, opus_triage, summarize_progress=None):
         tasks = load_all_tasks(kanban_dir)
 
     # 2. Reap in-flight.
+    print(f"[{oc.now_iso()}] Block: reaping in-flight agents")
     now = time.time()
     for t in tasks:
         m = oc.get_marker(t)
         if not m or m.get("state") != "dispatched":
+            continue
+        # A completed/done ticket is TERMINAL. A re-dispatch/adoption write race
+        # can re-seed a `dispatched` marker onto a ticket already marked done; the
+        # adopted-agent reap path then re-classifies it `completed` and re-runs the
+        # publish side-effects (a real `git checkout` that flips a shared repo's
+        # HEAD) on EVERY tick. Treat the marker as stale: clear it durably and skip
+        # re-reaping. (Ticket #48.)
+        if oc.is_done(t):
+            t = _reread_task(t)
+            if oc.is_done(t) and oc.is_in_flight(t):
+                clear_idle(kanban_dir, t["_board"], t["id"])
+                # Agents normally move their OWN ticket to completed before
+                # exiting, so this guard — not the action=="completed" branch
+                # below — is the usual completion path. Save the run-log turns
+                # before the marker (and its logFile pointer) is cleared, or
+                # the board loses the log for every well-behaved agent.
+                if not t.get("completedLog"):
+                    _save_completed_log(kanban_dir, t)
+                oc.clear_marker(t)
+                write_task(t["_path"], t)
             continue
         pid = m.get("pid")
         alive = _process_alive(pid)
@@ -1094,6 +1245,9 @@ def tick(kanban_dir, *, opus_triage, summarize_progress=None):
         elif action == "completed":
             if pid:
                 _release_proc(pid)
+            # Save the run-log turns before clearing the marker so they survive
+            # after the log file is deleted/archived (ticket #58).
+            _save_completed_log(kanban_dir, t)
             # Record the agent's output before marking the ticket done: kanban-only
             # work is auto-committed to master (gated by commit requirements);
             # everything else is published to the ticket's isolated branch.
@@ -1152,8 +1306,21 @@ def tick(kanban_dir, *, opus_triage, summarize_progress=None):
     # 3. Promote todo -> ready for any ticket whose dependencies are now met.
     # This is board housekeeping (it runs regardless of `enabled`): dispatch is
     # gated by `enabled`, but the Ready queue should stay current either way.
+    print(f"[{oc.now_iso()}] Block: promoting todo->ready tickets")
     tasks = load_all_tasks(kanban_dir)
-    for t in oc.promotable_tickets(tasks):
+    promotable = oc.promotable_tickets(tasks)
+    for t in promotable:
+        # Run initial triage (Sonnet) to fill in dependsOn and model before
+        # the ticket enters the Ready queue. Failures are swallowed so a
+        # Sonnet outage never blocks promotion.
+        try:
+            triage = initial_triage(kanban_dir, t, tasks) or {}
+        except Exception:
+            triage = {}
+        if "dependsOn" in triage:
+            t["dependsOn"] = triage["dependsOn"]
+        if "model" in triage:
+            t["model"] = triage["model"]
         _add_history(t, t.get("status"), "ready")
         t["status"] = "ready"
         write_task(t["_path"], t)
@@ -1163,6 +1330,8 @@ def tick(kanban_dir, *, opus_triage, summarize_progress=None):
     # 4 + 5. Dispatch from `ready` (only if enabled).
     if not state.get("enabled"):
         return
+
+    print(f"[{oc.now_iso()}] Block: dispatching work from ready queue")
 
     # Usage-limit pause (ticket #60): while parked we still reaped and promoted
     # above, but we must not dispatch new work into the same limit. Once the reset
@@ -1186,6 +1355,16 @@ def tick(kanban_dir, *, opus_triage, summarize_progress=None):
         return
     profiles = oc.list_profiles(kanban_dir)
     if not profiles:
+        # No profiles means dispatch is impossible (validate_triage drops every
+        # item and backfill_dispatch no-ops), so `ready` tickets silently pile up.
+        # Surface it in the activity feed so this failure mode is diagnosable
+        # instead of looking like a hung loop.
+        oc.append_activity(kanban_dir, {
+            "ts": oc.now_iso(), "kind": "skip",
+            "message": (f"{len(eligible)} ticket(s) ready but no profiles "
+                        "configured; cannot dispatch. Add one in the Profiles tab "
+                        "(.kanban/config/<name>.json)."),
+        })
         return
 
     response = opus_triage(_triage_prompt(kanban_dir), eligible, profiles, free) or {}
@@ -1232,10 +1411,15 @@ def tick(kanban_dir, *, opus_triage, summarize_progress=None):
             })
             continue
         oc.set_marker(t, marker)
-        # Record the sub-agent's session id at the top level so the board UI can
-        # offer a `claude --resume <id>` takeover command for a stuck ticket.
+        # Record the sub-agent's session id and cwd at the top level so the board
+        # UI can offer a `cd '<dir>'; claude --resume <id>` takeover command.
         if marker.get("sessionId"):
             t["claudeSessionId"] = marker["sessionId"]
+        if marker.get("cwd"):
+            t["claudeSessionDir"] = marker["cwd"]
+        # Persist logFile at top-level so it survives clear_marker (ticket #74).
+        if marker.get("logFile"):
+            t["runLogFile"] = marker["logFile"]
         _add_history(t, t.get("status"), "in_progress")
         t["status"] = "in_progress"
         write_task(t["_path"], t)
@@ -1292,6 +1476,51 @@ def _triage_prompt(kanban_dir):
         return "Return {\"dispatch\": []}"
 
 
+def _real_sonnet_triage(kanban_dir, task, all_tasks, model=None, timeout=60):
+    """Call Sonnet to classify a ticket being promoted from todo to ready.
+
+    Returns a dict with zero or more of: `dependsOn` (list of ticket ids) and
+    `model` (the model string to use for this ticket's agent). Returns `{}` on
+    any failure so the caller can still promote the ticket gracefully.
+    """
+    model = model or "claude-sonnet-4-6"
+    ticket_summaries = [
+        {"id": t.get("id"), "title": t.get("title", ""), "status": t.get("status", "")}
+        for t in all_tasks
+        if str(t.get("id")) != str(task.get("id"))
+    ]
+    prompt = (
+        "You are the kanban orchestrator performing initial triage on a ticket that "
+        "is about to move from TODO to Ready. Your job is to:\n"
+        "1. Identify which other tickets (by id) this ticket depends on (if any).\n"
+        "2. Select the best Claude model for the agent that will work this ticket.\n\n"
+        f"TICKET:\n"
+        f"  id: {task.get('id')}\n"
+        f"  title: {task.get('title', '')}\n"
+        f"  detail: {task.get('detail', '')}\n\n"
+        f"OTHER TICKETS ON THE BOARD:\n"
+        + json.dumps(ticket_summaries, ensure_ascii=False) + "\n\n"
+        "Reply with ONLY a JSON object — no prose, no markdown fences. Shape:\n"
+        '{"dependsOn": ["<id>", ...], "model": "<model-id>"}\n'
+        "Use an empty list for dependsOn if there are none. Model choices: "
+        "claude-opus-4-8 (complex/long tasks), claude-sonnet-4-6 (default), "
+        "claude-haiku-4-5-20251001 (simple/fast tasks)."
+    )
+    label = f"Assigning model for ticket #{task.get('id', '?')}"
+    try:
+        out = _run_tracked(
+            ["claude", "-p", prompt, "--model", model], label,
+            capture_output=True, text=True, timeout=timeout,
+        )
+        text = (out.stdout or "").strip()
+        start, end = text.find("{"), text.rfind("}")
+        if start < 0:
+            return {}
+        return json.loads(text[start:end + 1])
+    except (subprocess.SubprocessError, json.JSONDecodeError, ValueError, OSError):
+        return {}
+
+
 def _real_opus_triage(prompt, eligible, profiles, free, model=None, timeout=120):
     model = model or oc.DEFAULT_LOOP_MODEL
     payload = {
@@ -1303,9 +1532,11 @@ def _real_opus_triage(prompt, eligible, profiles, free, model=None, timeout=120)
                       "model": p.get("model")} for p in profiles],
     }
     full = prompt + "\n\nINPUT:\n" + json.dumps(payload, ensure_ascii=False)
+    ids = ", ".join(str(t["id"]) for t in eligible[:5])
+    label = f"Triage: dispatching tickets [{ids}]"
     try:
-        out = subprocess.run(["claude", "-p", full, "--model", model],
-                             capture_output=True, text=True, timeout=timeout)
+        out = _run_tracked(["claude", "-p", full, "--model", model], label,
+                           capture_output=True, text=True, timeout=timeout)
         text = out.stdout.strip()
         start, end = text.find("{"), text.rfind("}")
         return json.loads(text[start:end + 1]) if start >= 0 else {"dispatch": []}
