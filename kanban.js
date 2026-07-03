@@ -22,14 +22,27 @@ const UI_CONFIG = loadUiConfig();
 const POLL_MS = UI_CONFIG.pollMs;
 const COL_KEYS = ["todo","ready","in_progress","blocked","done"];
 const COL_LABELS = {todo:"Todo",ready:"Ready",in_progress:"In Progress",blocked:"Blocked",done:"Done"};
-// Ticket model picklist (size of model). Mirrors MODEL_VALUES in kanban_server.py.
-// Empty value clears the override so dispatch falls back to triage/profile default.
+// Ticket model picklist (size of model). Loaded from the server at runtime
+// (GET /api/models, populated by kanban_server.py's dynamic discovery) so it
+// reflects what's actually available rather than a hand-maintained mirror.
+// The entries below are the fallback shown until that fetch resolves, or if
+// it fails. Empty value clears the override so dispatch falls back to
+// triage/profile default.
 const MODEL_OPTIONS = [
   {value:"", label:"(default)"},
   {value:"claude-haiku-4-5-20251001", label:"Haiku (small)"},
   {value:"claude-sonnet-4-6", label:"Sonnet (medium)"},
   {value:"claude-opus-4-8", label:"Opus (large)"},
 ];
+(async function loadModelOptions(){
+  try{
+    const data = await apiFetch("/api/models");
+    if(data && Array.isArray(data.models) && data.models.length){
+      MODEL_OPTIONS.length = 1; // keep the "(default)" entry
+      data.models.forEach(m=>MODEL_OPTIONS.push({value:m.value, label:m.label}));
+    }
+  }catch(e){}
+})();
 function getModelName(modelId){
   const m=MODEL_OPTIONS.find(x=>x.value===modelId);
   if(m)return m.label;
