@@ -223,16 +223,22 @@ triage prompt (`orchestrator_triage_prompt.md`).
 - **Control state** is `.kanban/_orchestrator/state.json` (`enabled`, `concurrencyCap`,
   `stopAllRequested`), toggled from the **Orchestrator** tab. `enabled:false` pauses new
   dispatch (reaping still runs); "Stop all" kills everything in flight.
-- **Docker dev-workspace (ticket #16).** A board can set `useDocker: true` (Project
+- **Docker dev-workspace (tickets #16, #6).** A board can set `useDocker: true` (Project
   Settings) to run its dispatched agent INSIDE a per-repo Docker container instead of a
-  plain host subprocess. The orchestrator builds one image per board from
-  `_orchestrator/docker/Dockerfile` (tag `ai-kanban-workspace:<board>`), bind-mounts the
-  workspace root at `/workspace` (so the agent sees both its repo and the `.kanban`
-  tree), translates host paths in the prompt onto that mount, and supplies the board's
-  editable `envVars` map via `--env-file`. Credentials are NOT stored in `_meta.json`:
-  `ANTHROPIC_API_KEY` (and friends) are forwarded from the orchestrator's own environment
-  with `docker run -e`. Requires Docker on the host. Container reap/kill is by name
-  (`marker.containerName` → `docker kill`). Off by default; existing boards are unaffected.
+  plain host subprocess. **A `useDocker` board must ship its own per-board Dockerfile at
+  `_orchestrator/docker/<board-slug>.Dockerfile`** — the orchestrator builds each board's
+  image from that file (tag `ai-kanban-workspace:<board>`), NOT from the generic
+  `_orchestrator/docker/Dockerfile` (which is only a copy-me template and can't run most
+  boards' tests). If a useDocker board has no per-board Dockerfile, a dispatch-time
+  **preflight blocks the ticket** with an actionable `orchestrator.question` telling the
+  human to create the file — it never silently falls back to the generic node image.
+  The container bind-mounts the workspace root at `/workspace` (so the agent sees both its
+  repo and the `.kanban` tree), translates host paths in the prompt onto that mount, and
+  supplies the board's editable `envVars` map via `--env-file`. Credentials are NOT stored
+  in `_meta.json`: `ANTHROPIC_API_KEY` (and friends) are forwarded from the orchestrator's
+  own environment with `docker run -e`. Requires Docker on the host. Container reap/kill is
+  by name (`marker.containerName` → `docker kill`). Off by default; existing boards are
+  unaffected.
 - **Activity feed** is `.kanban/_orchestrator/activity.json`; per-run sub-agent logs are under
   `_orchestrator/runs/`. Both `config/` and `_orchestrator/` are excluded from board scans.
 - **In-flight marker** on a ticket: an `orchestrator` block (`state`, `profile`, `model`,

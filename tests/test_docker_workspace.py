@@ -148,6 +148,10 @@ def _docker_board(kanban, env=None):
     os.makedirs(dockerdir, exist_ok=True)
     with open(os.path.join(dockerdir, "Dockerfile"), "w", encoding="utf-8") as f:
         f.write("FROM node:20-slim\n")
+    # A useDocker board now builds from its own per-board Dockerfile (ticket #6);
+    # without it the preflight would block and _build_docker_image would skip.
+    with open(os.path.join(dockerdir, "demo.Dockerfile"), "w", encoding="utf-8") as f:
+        f.write("FROM node:20-slim\n")
 
 
 def test_spawn_agent_docker_runs_in_container(kanban, monkeypatch):
@@ -299,3 +303,141 @@ def test_server_empty_env_vars_removes_field(kanban, monkeypatch):
     ks.update_board_meta("demo", {"envVars": {}})
     meta = json.load(open(os.path.join(kanban, "demo", "_meta.json"), encoding="utf-8"))
     assert "envVars" not in meta
+
+
+# --- per-board Dockerfile requirement + preflight (ticket #6) ----------------
+
+def test_board_dockerfile_name():
+    assert oc.board_dockerfile_name("demo") == "demo.Dockerfile"
+    assert oc.board_dockerfile_name("Discord-Bot") == "discord-bot.Dockerfile"
+    # Empty/weird board names still yield a valid, non-empty filename.
+    assert oc.board_dockerfile_name("") == "workspace.Dockerfile"
+
+
+def test_resolve_board_dockerfile_prefers_per_board(tmp_path):
+    docker_dir = str(tmp_path)
+    # Only the generic template exists -> no per-board resolution.
+    open(os.path.join(docker_dir, "Dockerfile"), "w").write("FROM node:20-slim\n")
+    assert oc.resolve_board_dockerfile(docker_dir, "demo") is None
+    # Add the per-board file -> it resolves to that exact path.
+    per_board = os.path.join(docker_dir, "demo.Dockerfile")
+    open(per_board, "w").write("FROM python:3\n")
+    assert oc.resolve_board_dockerfile(docker_dir, "demo") == per_board
+
+
+def test_resolve_board_dockerfile_missing_dir():
+    assert oc.resolve_board_dockerfile("", "demo") is None
+    assert oc.resolve_board_dockerfile("/no/such/dir", "demo") is None
+
+
+def test_docker_preflight_ok_when_disabled(tmp_path):
+    # A non-docker board never needs a Dockerfile -> trivially ok.
+    ok, reason = oc.docker_preflight(str(tmp_path), {"useDocker": False}, "demo")
+    assert ok is True
+
+
+def test_docker_preflight_ok_when_per_board_present(tmp_path):
+    docker_dir = str(tmp_path)
+    open(os.path.join(docker_dir, "demo.Dockerfile"), "w").write("FROM python:3\n")
+    ok, reason = oc.docker_preflight(docker_dir, {"useDocker": True}, "demo")
+    assert ok is True
+
+
+def test_docker_preflight_fails_when_missing(tmp_path):
+    # useDocker on but no per-board Dockerfile (even a generic one) -> blocked,
+    # with an actionable reason naming the file to create.
+    open(os.path.join(str(tmp_path), "Dockerfile"), "w").write("FROM node:20-slim\n")
+    ok, reason = oc.docker_preflight(str(tmp_path), {"useDocker": True}, "demo")
+    assert ok is False
+    assert "demo.Dockerfile" in reason
+
+
+# --- image build resolves the per-board Dockerfile --------------------------
+
+def test_build_docker_image_uses_per_board_dockerfile(kanban, monkeypatch):
+    docker_dir = os.path.join(kanban, "_orchestrator", "docker")
+    os.makedirs(docker_dir, exist_ok=True)
+    # Generic template present but should NOT be the one built from.
+    open(os.path.join(docker_dir, "Dockerfile"), "w").write("FROM node:20-slim\n")
+    per_board = os.path.join(docker_dir, "demo.Dockerfile")
+    open(per_board, "w").write("FROM python:3\n")
+
+    argvs = []
+    monkeypatch.setattr(orch.subprocess, "run",
+                        lambda argv, **k: argvs.append(argv)
+                        or type("R", (), {"returncode": 0})())
+    import io
+    assert orch._build_docker_image(kanban, "demo", io.StringIO()) is True
+    argv = argvs[0]
+    assert per_board in argv
+    assert argv[argv.index("-f") + 1] == per_board
+
+
+def test_build_docker_image_skips_when_no_per_board(kanban):
+    docker_dir = os.path.join(kanban, "_orchestrator", "docker")
+    os.makedirs(docker_dir, exist_ok=True)
+    # Only the generic template -> no per-board Dockerfile -> no build.
+    open(os.path.join(docker_dir, "Dockerfile"), "w").write("FROM node:20-slim\n")
+    import io
+    assert orch._build_docker_image(kanban, "demo", io.StringIO()) is False
+
+
+# --- dispatch is blocked (not spawned) when per-board Dockerfile missing -----
+
+def _docker_meta(kanban, use_docker=True):
+    with open(os.path.join(kanban, "demo", "_meta.json"), "w", encoding="utf-8") as f:
+        json.dump({"project": "Demo", "useDocker": use_docker}, f)
+    os.makedirs(os.path.join(kanban, "_orchestrator", "docker"), exist_ok=True)
+
+
+def test_dispatch_one_blocks_when_dockerfile_missing(kanban, monkeypatch):
+    _docker_meta(kanban)  # useDocker on, no per-board Dockerfile
+
+    spawned = []
+    monkeypatch.setattr(orch, "spawn_agent",
+                        lambda *a, **k: spawned.append(a) or {})
+
+    task = {"id": "1", "title": "x", "detail": "", "status": "ready",
+            "_board": "demo", "_path": os.path.join(kanban, "demo", "1.json")}
+    dispatched = orch._dispatch_one(kanban, task,
+                                    {"name": "g", "systemPrompt": "p"}, "m")
+
+    assert dispatched is False
+    assert spawned == []  # never spawned
+    assert task["status"] == "blocked"
+    q = oc.get_marker(task).get("question")
+    assert q and q["type"] == "input"
+    assert "demo.Dockerfile" in q["prompt"]
+    assert q["answer"] is None
+    # Persisted to disk.
+    saved = json.load(open(task["_path"], encoding="utf-8"))
+    assert saved["status"] == "blocked"
+    assert saved["orchestrator"]["question"]["prompt"]
+
+
+def test_dispatch_one_spawns_when_dockerfile_present(kanban, monkeypatch):
+    _docker_meta(kanban)
+    open(os.path.join(kanban, "_orchestrator", "docker", "demo.Dockerfile"),
+         "w").write("FROM python:3\n")
+
+    monkeypatch.setattr(orch, "spawn_agent",
+                        lambda *a, **k: {"state": "dispatched", "pid": 1,
+                                         "sessionId": "s", "cwd": "c",
+                                         "logFile": "l"})
+    task = {"id": "1", "title": "x", "detail": "", "status": "ready",
+            "_board": "demo", "_path": os.path.join(kanban, "demo", "1.json")}
+    dispatched = orch._dispatch_one(kanban, task,
+                                    {"name": "g", "systemPrompt": "p"}, "m")
+    assert dispatched is True
+    assert task["status"] == "in_progress"
+
+
+def test_dispatch_one_non_docker_spawns(kanban, monkeypatch):
+    # A non-docker board is never subject to the preflight.
+    monkeypatch.setattr(orch, "spawn_agent",
+                        lambda *a, **k: {"state": "dispatched", "pid": 1})
+    task = {"id": "1", "title": "x", "detail": "", "status": "ready",
+            "_board": "demo", "_path": os.path.join(kanban, "demo", "1.json")}
+    assert orch._dispatch_one(kanban, task,
+                              {"name": "g", "systemPrompt": "p"}, "m") is True
+    assert task["status"] == "in_progress"

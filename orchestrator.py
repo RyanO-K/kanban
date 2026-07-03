@@ -916,9 +916,15 @@ def _build_docker_image(kanban_dir, board, log_f):
     captured in the same log and reaped as a crash, surfacing the problem to a human.
     """
     docker_dir = _docker_dir(kanban_dir)
-    dockerfile = os.path.join(docker_dir, "Dockerfile")
-    if not os.path.isfile(dockerfile):
-        log_f.write(f"[docker] no Dockerfile at {dockerfile}; skipping image build\n")
+    # A useDocker board must build from its own per-board Dockerfile (ticket #6);
+    # the generic node template can't run most boards' tests. The dispatch-time
+    # preflight already blocks a board missing this file, so reaching here without
+    # one is defensive (e.g. a direct call) and simply skips the build.
+    dockerfile = oc.resolve_board_dockerfile(docker_dir, board)
+    if not dockerfile:
+        log_f.write(f"[docker] no per-board Dockerfile "
+                    f"({oc.board_dockerfile_name(board)}) in {docker_dir}; "
+                    f"skipping image build\n")
         log_f.flush()
         return False
     argv = oc.docker_build_argv(oc.docker_image_tag(board), dockerfile, docker_dir)
@@ -1041,6 +1047,59 @@ def spawn_agent(kanban_dir, board, task, profile, model):
     if container_name:
         marker["containerName"] = container_name
     return marker
+
+
+def _block_for_docker_preflight(kanban_dir, task, reason):
+    """Block a useDocker ticket whose per-board Dockerfile is missing (ticket #6).
+
+    Rather than silently building the generic node image (which can't run the
+    board's tests), move the ticket to `blocked` and attach an actionable
+    `orchestrator.question` telling the human to create the per-board Dockerfile.
+    A human answer re-dispatches the ticket next tick (eligible_tickets re-queues a
+    blocked ticket whose question is answered); the preflight re-checks then.
+    """
+    marker = oc.get_marker(task) or {}
+    marker["state"] = "blocked"
+    marker["question"] = oc.build_question(reason, "input", fmt="text")
+    oc.set_marker(task, marker)
+    _add_history(task, task.get("status"), "blocked")
+    task["status"] = "blocked"
+    write_task(task["_path"], task)
+    oc.append_activity(kanban_dir, {
+        "ts": oc.now_iso(), "kind": "blocked", "board": task["_board"],
+        "ticket": task["id"], "message": reason,
+    })
+
+
+def _dispatch_one(kanban_dir, task, profile, model):
+    """Dispatch a single ticket, or block it if its Docker preflight fails.
+
+    Returns True if a sub-agent was spawned, False if the ticket was blocked (a
+    `useDocker` board with no per-board Dockerfile — see ticket #6) and no agent
+    was started. Raises on a genuine spawn failure so the caller can log it and
+    keep dispatching the other tickets this tick.
+    """
+    board_meta = oc.read_board_meta(kanban_dir, task["_board"])
+    ok, reason = oc.docker_preflight(_docker_dir(kanban_dir), board_meta,
+                                     task["_board"])
+    if not ok:
+        _block_for_docker_preflight(kanban_dir, task, reason)
+        return False
+    marker = spawn_agent(kanban_dir, task["_board"], task, profile, model)
+    oc.set_marker(task, marker)
+    # Record the sub-agent's session id and cwd at the top level so the board UI
+    # can offer a `cd '<dir>'; claude --resume <id>` takeover command.
+    if marker.get("sessionId"):
+        task["claudeSessionId"] = marker["sessionId"]
+    if marker.get("cwd"):
+        task["claudeSessionDir"] = marker["cwd"]
+    # Persist logFile at top-level so it survives clear_marker (ticket #74).
+    if marker.get("logFile"):
+        task["runLogFile"] = marker["logFile"]
+    _add_history(task, task.get("status"), "in_progress")
+    task["status"] = "in_progress"
+    write_task(task["_path"], task)
+    return True
 
 
 def _build_agent_prompt(task, profile, board_meta=None):
@@ -1540,26 +1599,18 @@ def tick(kanban_dir, *, opus_triage, summarize_progress=None, initial_triage=Non
         # A spawn failure for one ticket must not abort the whole tick — log it
         # and move on, so other tickets still get dispatched.
         try:
-            marker = spawn_agent(kanban_dir, t["_board"], t, profile, model)
+            dispatched = _dispatch_one(kanban_dir, t, profile, model)
         except Exception as e:
             oc.append_activity(kanban_dir, {
                 "ts": oc.now_iso(), "kind": "error", "board": t["_board"],
                 "ticket": t["id"], "message": f"spawn failed: {e}",
             })
             continue
-        oc.set_marker(t, marker)
-        # Record the sub-agent's session id and cwd at the top level so the board
-        # UI can offer a `cd '<dir>'; claude --resume <id>` takeover command.
-        if marker.get("sessionId"):
-            t["claudeSessionId"] = marker["sessionId"]
-        if marker.get("cwd"):
-            t["claudeSessionDir"] = marker["cwd"]
-        # Persist logFile at top-level so it survives clear_marker (ticket #74).
-        if marker.get("logFile"):
-            t["runLogFile"] = marker["logFile"]
-        _add_history(t, t.get("status"), "in_progress")
-        t["status"] = "in_progress"
-        write_task(t["_path"], t)
+        # A useDocker board with no per-board Dockerfile is blocked, not spawned
+        # (ticket #6). `_dispatch_one` already recorded the block in the activity
+        # feed and wrote the ticket's question, so just move on.
+        if not dispatched:
+            continue
         oc.append_activity(kanban_dir, {
             "ts": oc.now_iso(), "kind": "dispatch", "board": t["_board"],
             "ticket": t["id"], "profile": item["profile"], "model": model,

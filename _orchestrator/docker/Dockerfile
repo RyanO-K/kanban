@@ -1,10 +1,17 @@
-# Workspace image for AI-kanban Docker-mode agents (ticket #16).
+# Copy-me template for AI-kanban Docker-mode agents (tickets #16, #6).
 #
-# The orchestrator builds one image per board from this template
-# (`docker build -t ai-kanban-workspace:<board> -f Dockerfile .`) and runs the
-# dispatched `claude -p` agent inside a container from it, with the workspace
-# root bind-mounted at /workspace. The image therefore only needs the Claude
-# Code CLI, git, and the runtime the agent expects to find on PATH.
+# This file is a TEMPLATE, not the image any board actually builds from. A
+# `useDocker` board must have its own per-board Dockerfile at
+# `_orchestrator/docker/<board-slug>.Dockerfile`; the orchestrator builds from
+# that (`docker build -t ai-kanban-workspace:<board> -f <board>.Dockerfile .`)
+# and runs the dispatched `claude -p` agent inside a container from it, with the
+# workspace root bind-mounted at /workspace. If a useDocker board has no per-board
+# Dockerfile, the orchestrator BLOCKS the ticket with a question (it does NOT fall
+# back to this generic node image, which can't run most boards' tests).
+#
+# To onboard a board: copy this file to `<board-slug>.Dockerfile` and add the
+# toolchain that board's tests need (e.g. Python + pytest). The image only needs
+# the Claude Code CLI, git, and the runtime the agent expects to find on PATH.
 #
 # Credentials are NOT baked in — the orchestrator forwards ANTHROPIC_API_KEY
 # (and friends) from its own environment via `docker run -e`, and per-board env

@@ -459,6 +459,57 @@ def docker_run_argv(image_tag, container_name, mount_src, env_file, inner_argv,
     return argv
 
 
+def board_dockerfile_name(board):
+    """Filename of a board's REQUIRED per-board Dockerfile, e.g. `demo.Dockerfile`.
+
+    A `useDocker` board must build from its own Dockerfile — the generic
+    `node:20-slim` template can't run most boards' tests (ticket #6). This is the
+    name the orchestrator looks for under `_orchestrator/docker/`; the slug is
+    Docker-safe so the name is always valid and non-empty.
+    """
+    return f"{_docker_safe(board)}.Dockerfile"
+
+
+def resolve_board_dockerfile(docker_dir, board):
+    """Absolute path to a board's per-board Dockerfile if it exists, else None.
+
+    Looks only for `<docker_dir>/<board-slug>.Dockerfile`. Deliberately does NOT
+    fall back to the generic `Dockerfile`: a `useDocker` board with no per-board
+    file must be blocked (see `docker_preflight`), not silently built from an
+    image that can't run its tests.
+    """
+    if not docker_dir:
+        return None
+    path = os.path.join(docker_dir, board_dockerfile_name(board))
+    return path if os.path.isfile(path) else None
+
+
+def docker_preflight(docker_dir, board_meta, board):
+    """Whether a board may be dispatched in Docker mode; returns `(ok, reason)`.
+
+    `ok` is True when either the board does not use Docker (it never runs in a
+    container, so no Dockerfile is needed) OR it uses Docker AND a per-board
+    Dockerfile exists at `<docker_dir>/<board-slug>.Dockerfile`. When `useDocker`
+    is on but the per-board file is missing, `ok` is False and `reason` is an
+    actionable instruction naming the file to create — the orchestrator blocks the
+    ticket with it instead of silently building the wrong (generic) image.
+    """
+    if not use_docker(board_meta):
+        return True, "docker not enabled"
+    if resolve_board_dockerfile(docker_dir, board):
+        return True, "per-board Dockerfile present"
+    name = board_dockerfile_name(board)
+    reason = (
+        f"Board '{board}' has useDocker enabled but no per-board Dockerfile. "
+        f"Create _orchestrator/docker/{name} so the container has the toolchain "
+        f"(e.g. Python/pytest) needed to run this board's tests — copy the generic "
+        f"_orchestrator/docker/Dockerfile as a starting template and add the deps. "
+        f"The generic node image is NOT used as a fallback. Once the file exists, "
+        f"answer this question (any note) to re-dispatch the ticket."
+    )
+    return False, reason
+
+
 def safe_name(name):
     if not name:
         return None
