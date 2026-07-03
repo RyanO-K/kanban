@@ -104,6 +104,10 @@ body {
 .bell-badge.bump { animation:countPop var(--dur-med) var(--ease-spring); }
 /* Needs-attention modal: a slightly wider, scrollable stack of question cards. */
 #bellModal .modal { width:480px; }
+/* Board settings modal: two-column layout to reduce height */
+#boardModal .modal { width:780px; max-height:90vh; overflow-y:auto; }
+.board-form-cols { display:grid; grid-template-columns:1fr 1fr; gap:0 24px; }
+.board-form-col { display:flex; flex-direction:column; }
 .bell-inbox { max-height:min(60vh,520px); overflow-y:auto; margin:0 -6px; padding:2px 6px; }
 .view-tabs { display:flex; gap:4px; }
 .view-tab { background:var(--bg); color:var(--text-muted); border:1px solid var(--surface-alt);
