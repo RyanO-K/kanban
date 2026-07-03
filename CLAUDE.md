@@ -256,6 +256,19 @@ triage prompt (`orchestrator_triage_prompt.md`).
   orchestrator auto-commits/pushes after reap using host credentials (`autoCommit`/`autoPush`
   in `state.json`). A board may forward a real author via `passthroughEnv`
   (`GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL`/`GIT_COMMITTER_*`), which overrides the fallback.
+  **End-to-end validated on ai-kanban (ticket #10):** `_orchestrator/docker/ai-kanban.Dockerfile`
+  (node:20-slim + Python 3 + git + Claude CLI + `pytest`/`psutil`) was built for real and ran
+  `python -m pytest tests/` against the workspace-root mount in-container, plus a real
+  secret-passthrough and in-container `git commit` check. In-container the suite is **407/410
+  passing**: the 3 failures are `test_spawn_agent_*`, whose `fake_popen` mocks model only the
+  Windows spawn path — the Linux container takes the POSIX `start_new_session` branch, so those
+  tests are host-OS-specific, not a container/toolchain defect (on the Windows host the suite is
+  fully green, 408/408). **`useDocker` is OFF for ai-kanban by default** — turning it on
+  (Project Settings → `useDocker: true`) containerizes *every* future ai-kanban dispatch and
+  requires `ai-kanban.Dockerfile` to stay green (the image must keep building and the suite must
+  keep passing in it), so leave it off unless you are deliberately exercising Docker mode.
+  Validation is a manual `docker build`/`docker run` (see the ticket #10 comment), not a
+  standing test — the pytest suite mocks Docker to stay fast and host-independent.
 - **Activity feed** is `.kanban/_orchestrator/activity.json`; per-run sub-agent logs are under
   `_orchestrator/runs/`. Both `config/` and `_orchestrator/` are excluded from board scans.
 - **In-flight marker** on a ticket: an `orchestrator` block (`state`, `profile`, `model`,
