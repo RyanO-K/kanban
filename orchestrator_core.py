@@ -351,6 +351,35 @@ def board_env_vars(board_meta):
     return out
 
 
+def board_passthrough_env(board_meta):
+    """De-duplicated list of valid env-var NAMES from a board's `passthroughEnv`.
+
+    `passthroughEnv` (ticket #7) is the secret-name counterpart to `envVars`: it
+    lists environment-variable NAMES the orchestrator forwards into the container
+    with a bare `docker run -e NAME`, so each value is inherited from the
+    orchestrator's own environment and is NEVER written to `_meta.json`, the
+    rendered env-file, or the image. That is how a board gets a non-Anthropic
+    secret (GitHub push token, `DATABASE_URL`, `RENDER_API_KEY`, Discord token)
+    into its container without any value touching disk.
+
+    Only entries that are valid env-var names survive (`valid_env_key`); invalid
+    or non-string entries are dropped. Order is preserved and duplicates removed,
+    so a malformed Project-Settings payload can never inject junk names. A
+    non-list (or missing) `passthroughEnv` yields an empty list.
+    """
+    raw = (board_meta or {}).get("passthroughEnv")
+    if not isinstance(raw, list):
+        return []
+    out = []
+    seen = set()
+    for name in raw:
+        if not valid_env_key(name) or name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+    return out
+
+
 def render_env_file(env):
     """Render an env map to Docker `--env-file` text: one `KEY=VALUE` per line.
 

@@ -1283,6 +1283,22 @@ function envTextToMap(text){
   });
   return out;
 }
+// passthroughEnv is a list of secret env-var NAMES (values live only in the
+// orchestrator env, never on disk). Textarea is one name per line.
+function namesToText(list){
+  return Array.isArray(list)?list.join("\n"):"";
+}
+function textToNames(text){
+  const out=[],seen={};
+  (text||"").split(/\r?\n/).forEach(line=>{
+    const s=line.trim();
+    if(!s||s[0]==="#")return;                             // skip blanks/comments
+    if(!/^[A-Za-z_][A-Za-z0-9_]*$/.test(s))return;        // valid names only
+    if(seen[s])return;                                    // de-dupe
+    seen[s]=1;out.push(s);
+  });
+  return out;
+}
 function openBoardModal(){
   const d=currentBoardData||{};
   $("bProject").value=d.project||"";
@@ -1293,6 +1309,7 @@ function openBoardModal(){
   $("bUseWorktrees").checked=d.useWorktrees===true;
   $("bUseDocker").checked=d.useDocker===true;
   $("bEnvVars").value=envMapToText(d.envVars);
+  $("bPassthroughEnv").value=namesToText(d.passthroughEnv);
   $("boardModal").classList.add("open");
   setTimeout(()=>$("bProject").focus(),50);
 }
@@ -1304,7 +1321,7 @@ $("boardModal").addEventListener("click",e=>{if(e.target===$("boardModal"))close
 $("boardForm").addEventListener("submit",async e=>{
   e.preventDefault();
   if(!currentFile||currentFile==="__all__")return;
-  const payload={project:$("bProject").value.trim(),directory:$("bDirectory").value.trim(),description:$("bDescription").value.trim(),commitRequirements:$("bCommitReq").value.trim(),useWorktrees:$("bUseWorktrees").checked,useDocker:$("bUseDocker").checked,envVars:envTextToMap($("bEnvVars").value)};
+  const payload={project:$("bProject").value.trim(),directory:$("bDirectory").value.trim(),description:$("bDescription").value.trim(),commitRequirements:$("bCommitReq").value.trim(),useWorktrees:$("bUseWorktrees").checked,useDocker:$("bUseDocker").checked,envVars:envTextToMap($("bEnvVars").value),passthroughEnv:textToNames($("bPassthroughEnv").value)};
   try{
     await apiFetch("/api/board/"+encodeURIComponent(currentFile)+"/meta",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
     showToast("Project settings saved");closeBoardModal();lastMtime=0;loadFiles();poll();

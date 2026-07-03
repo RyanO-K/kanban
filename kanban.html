@@ -146,6 +146,11 @@
           placeholder="One KEY=VALUE per line, e.g.&#10;NODE_ENV=development&#10;DATABASE_URL=postgres://..."></textarea>
       </label>
       <div style="font-size:11px;color:var(--text-muted);margin:-6px 0 14px;">Passed to the container via <code>--env-file</code> (Docker mode). One <code>KEY=VALUE</code> per line; blank lines and <code>#</code> comments are ignored. Stored as <code>envVars</code> on _meta.json — do <strong>not</strong> put secrets here; forward those from the orchestrator's own environment (e.g. <code>ANTHROPIC_API_KEY</code>) instead.</div>
+      <label class="form-label">Forwarded secret names (one per line)
+        <textarea id="bPassthroughEnv" class="form-input form-textarea" rows="4" spellcheck="false"
+          placeholder="Env-var NAMES only, e.g.&#10;GITHUB_TOKEN&#10;DATABASE_URL&#10;RENDER_API_KEY"></textarea>
+      </label>
+      <div style="font-size:11px;color:var(--text-muted);margin:-6px 0 14px;"><strong>Names only</strong> — the <em>value</em> of each is read from the orchestrator's own environment at dispatch and forwarded with <code>docker run -e NAME</code>. Nothing is ever written to <code>_meta.json</code>, the env-file, or the image. Use this for secrets (GitHub push token, <code>DATABASE_URL</code>, <code>RENDER_API_KEY</code>, Discord token); a listed name absent from the orchestrator env is skipped with a warning in the run log. Anthropic credentials are always forwarded automatically. Stored as <code>passthroughEnv</code> on _meta.json.</div>
       <div class="form-actions">
         <button type="button" class="btn btn-cancel" id="boardCancelBtn">Cancel</button>
         <button type="submit" class="btn btn-create">Save</button>

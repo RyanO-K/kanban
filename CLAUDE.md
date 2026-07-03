@@ -234,9 +234,17 @@ triage prompt (`orchestrator_triage_prompt.md`).
   human to create the file — it never silently falls back to the generic node image.
   The container bind-mounts the workspace root at `/workspace` (so the agent sees both its
   repo and the `.kanban` tree), translates host paths in the prompt onto that mount, and
-  supplies the board's editable `envVars` map via `--env-file`. Credentials are NOT stored
-  in `_meta.json`: `ANTHROPIC_API_KEY` (and friends) are forwarded from the orchestrator's
-  own environment with `docker run -e`. Requires Docker on the host. Container reap/kill is
+  supplies the board's editable `envVars` map via `--env-file`.
+  **Env split (ticket #7):** `envVars` is a `{KEY: VALUE}` map of NON-secret config
+  (`NODE_ENV`, feature flags) — values live on disk in `_meta.json` (gitignored) and ride in
+  via `--env-file`. `passthroughEnv` is a list of secret env-var **NAMES** (GitHub push
+  token, `DATABASE_URL`, `RENDER_API_KEY`, Discord token) — only the name is stored; the
+  orchestrator forwards each present name with a bare `docker run -e NAME` so the VALUE is
+  inherited from its own environment and is never written to `_meta.json`, the env-file, or
+  the image. A `passthroughEnv` name absent from the orchestrator env is skipped but logged
+  as a warning in the run log (visible, not silently dropped). The hardcoded Anthropic
+  credentials (`ANTHROPIC_API_KEY` and friends) always forward first, then the board's
+  `passthroughEnv`, de-duplicated. Requires Docker on the host. Container reap/kill is
   by name (`marker.containerName` → `docker kill`). Off by default; existing boards are
   unaffected.
 - **Activity feed** is `.kanban/_orchestrator/activity.json`; per-run sub-agent logs are under

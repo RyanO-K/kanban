@@ -305,6 +305,126 @@ def test_server_empty_env_vars_removes_field(kanban, monkeypatch):
     assert "envVars" not in meta
 
 
+# --- passthroughEnv: name-only secret forwarding (ticket #7) -----------------
+#
+# A board forwards non-Anthropic secrets (GitHub token, DATABASE_URL, etc.) into
+# its container by NAME only: names live on disk in `passthroughEnv`, values only
+# in the orchestrator's own environment (forwarded with bare `docker run -e NAME`).
+
+def test_board_passthrough_env_keeps_valid_names_deduped():
+    meta = {"passthroughEnv": ["GITHUB_TOKEN", "DATABASE_URL", "GITHUB_TOKEN",
+                               "1bad", "bad-key", "has space", "", None, 5,
+                               "_OK1"]}
+    # Valid names only, order preserved, duplicates removed.
+    assert oc.board_passthrough_env(meta) == [
+        "GITHUB_TOKEN", "DATABASE_URL", "_OK1"]
+
+
+def test_board_passthrough_env_non_list_is_empty():
+    assert oc.board_passthrough_env({"passthroughEnv": "GITHUB_TOKEN"}) == []
+    assert oc.board_passthrough_env({"passthroughEnv": {"A": 1}}) == []
+    assert oc.board_passthrough_env({}) == []
+    assert oc.board_passthrough_env(None) == []
+
+
+def test_docker_dispatch_passthrough_ordering_and_warning(kanban, monkeypatch):
+    # Board lists three secret NAMES; ANTHROPIC_API_KEY is also an Anthropic
+    # default (must dedupe), GITHUB_TOKEN is present, MISSING_SECRET is absent.
+    import io
+    meta = {"project": "Demo", "useDocker": True,
+            "passthroughEnv": ["GITHUB_TOKEN", "ANTHROPIC_API_KEY",
+                               "MISSING_SECRET"]}
+    docker_dir = os.path.join(kanban, "_orchestrator", "docker")
+    os.makedirs(docker_dir, exist_ok=True)
+    open(os.path.join(docker_dir, "demo.Dockerfile"), "w").write("FROM python:3\n")
+
+    monkeypatch.setattr(orch.subprocess, "run",
+                        lambda *a, **k: type("R", (), {"returncode": 0})())
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp-secret")
+    for absent in ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+                   "CLAUDE_CODE_OAUTH_TOKEN", "MISSING_SECRET"):
+        monkeypatch.delenv(absent, raising=False)
+
+    log = io.StringIO()
+    cmd, _cname = orch._docker_dispatch(kanban, "demo", {"id": "1"}, meta,
+                                        "prompt", "sess", "m", None, log)
+    forwarded = [cmd[i + 1] for i, a in enumerate(cmd) if a == "-e"]
+    # Anthropic defaults first, then the board's present secret; the duplicate
+    # ANTHROPIC_API_KEY appears once; the absent MISSING_SECRET is not forwarded.
+    assert forwarded == ["ANTHROPIC_API_KEY", "GITHUB_TOKEN"]
+    # A value is never echoed into the argv, only the name.
+    assert "ghp-secret" not in cmd and "sk-test" not in cmd
+    # The listed-but-absent secret is logged as a visible warning, not dropped
+    # silently.
+    assert "MISSING_SECRET" in log.getvalue()
+
+
+def test_spawn_agent_docker_forwards_passthrough_env(kanban, monkeypatch):
+    with open(os.path.join(kanban, "demo", "_meta.json"), "w",
+              encoding="utf-8") as f:
+        json.dump({"project": "Demo", "useDocker": True,
+                   "passthroughEnv": ["GITHUB_TOKEN"]}, f)
+    docker_dir = os.path.join(kanban, "_orchestrator", "docker")
+    os.makedirs(docker_dir, exist_ok=True)
+    open(os.path.join(docker_dir, "demo.Dockerfile"), "w").write("FROM python:3\n")
+
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp-secret")
+    monkeypatch.setattr(orch.subprocess, "run",
+                        lambda *a, **k: type("R", (), {"returncode": 0})())
+    captured = {}
+
+    class FakeProc:
+        pid = 7779
+
+        def poll(self):
+            return None
+
+    def fake_popen(cmd, **k):
+        captured["cmd"] = cmd
+        return FakeProc()
+
+    monkeypatch.setattr(orch.subprocess, "Popen", fake_popen)
+    task = {"id": "1", "title": "x", "detail": "", "_board": "demo",
+            "_path": os.path.join(kanban, "demo", "1.json")}
+    orch.spawn_agent(kanban, "demo", task, {"name": "g", "systemPrompt": "p"}, "m")
+    cmd = captured["cmd"]
+    assert "GITHUB_TOKEN" in cmd       # forwarded by name
+    assert "ghp-secret" not in cmd     # value never written into the argv
+
+
+def test_server_persists_passthrough_env(kanban, monkeypatch):
+    monkeypatch.setattr(ks, "KANBAN_DIR", kanban)
+    ks.update_board_meta("demo", {"passthroughEnv": [
+        "GITHUB_TOKEN", "DATABASE_URL", "bad-key", "GITHUB_TOKEN"]})
+    meta = json.load(open(os.path.join(kanban, "demo", "_meta.json"),
+                          encoding="utf-8"))
+    assert meta["passthroughEnv"] == ["GITHUB_TOKEN", "DATABASE_URL"]
+
+    data, status = ks.load_board("demo")
+    assert status == 200
+    assert data["passthroughEnv"] == ["GITHUB_TOKEN", "DATABASE_URL"]
+
+
+def test_server_passthrough_env_accepts_newline_string(kanban, monkeypatch):
+    # The Project Settings textarea submits one name per line.
+    monkeypatch.setattr(ks, "KANBAN_DIR", kanban)
+    ks.update_board_meta("demo", {
+        "passthroughEnv": "GITHUB_TOKEN\nDATABASE_URL\n\nbad-key\n"})
+    meta = json.load(open(os.path.join(kanban, "demo", "_meta.json"),
+                          encoding="utf-8"))
+    assert meta["passthroughEnv"] == ["GITHUB_TOKEN", "DATABASE_URL"]
+
+
+def test_server_empty_passthrough_env_removes_field(kanban, monkeypatch):
+    monkeypatch.setattr(ks, "KANBAN_DIR", kanban)
+    ks.update_board_meta("demo", {"passthroughEnv": ["GITHUB_TOKEN"]})
+    ks.update_board_meta("demo", {"passthroughEnv": []})
+    meta = json.load(open(os.path.join(kanban, "demo", "_meta.json"),
+                          encoding="utf-8"))
+    assert "passthroughEnv" not in meta
+
+
 # --- per-board Dockerfile requirement + preflight (ticket #6) ----------------
 
 def test_board_dockerfile_name():

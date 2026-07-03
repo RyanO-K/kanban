@@ -507,7 +507,8 @@ def load_board(slug):
     }
     # Pass through optional board-level metadata if present.
     for key in ("context", "openQuestions", "outOfScope", "commitRequirements",
-                "directory", "useWorktrees", "useDocker", "envVars"):
+                "directory", "useWorktrees", "useDocker", "envVars",
+                "passthroughEnv"):
         if key in meta:
             result[key] = meta[key]
     # Surface the one-paragraph context blurb as a flat field for the settings
@@ -524,12 +525,14 @@ def load_board(slug):
 # `useWorktrees` is the per-project boolean (ticket #40) gating whether tickets
 # are worked in a git worktree or in place on a branch. `useDocker` +
 # `envVars` (ticket #16) gate/configure running the agent inside a per-repo
-# Docker container. The flat `description` field is handled specially (merged
-# into `context.description`); `envVars` is sanitized specially (a dict, not a
-# scalar) just below.
+# Docker container. `passthroughEnv` (ticket #7) lists secret env-var NAMES the
+# orchestrator forwards into the container by name only (values stay in the
+# orchestrator env, never on disk). The flat `description` field is handled
+# specially (merged into `context.description`); `envVars` and `passthroughEnv`
+# are sanitized specially (a dict / a list of names, not a scalar) just below.
 EDITABLE_META_FIELDS = ("project", "context", "openQuestions", "outOfScope",
                         "commitRequirements", "directory", "useWorktrees",
-                        "useDocker", "envVars")
+                        "useDocker", "envVars", "passthroughEnv")
 
 
 def update_board_meta(slug, payload):
@@ -561,6 +564,20 @@ def update_board_meta(slug, payload):
         # non-scalar values) and remove the field entirely when nothing survives.
         if key == "envVars":
             clean = _oc.board_env_vars({"envVars": value})
+            if clean:
+                meta[key] = clean
+            else:
+                meta.pop(key, None)
+            continue
+        # `passthroughEnv` is a list of env-var NAMES (ticket #7): secret names
+        # forwarded to the container by name only. The Project Settings textarea
+        # submits one name per line, so accept either a JSON list or a
+        # newline/comma/space-separated string; sanitize through the core (drop
+        # invalid names, de-dupe) and remove the field when nothing survives.
+        if key == "passthroughEnv":
+            if isinstance(value, str):
+                value = [n for n in re.split(r"[\s,]+", value.strip()) if n]
+            clean = _oc.board_passthrough_env({"passthroughEnv": value})
             if clean:
                 meta[key] = clean
             else:

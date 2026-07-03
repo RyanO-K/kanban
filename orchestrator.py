@@ -953,8 +953,11 @@ def _docker_dispatch(kanban_dir, board, task, board_meta, prompt, session_id,
 
     Mounts the workspace root at `/workspace`, so the agent sees both its board
     repo and the `.AI-kanban` tree; the prompt's host paths are translated onto
-    that mount. The board's editable env vars ride in via `--env-file`, and known
-    credential env vars are forwarded from the orchestrator's own environment.
+    that mount. The board's editable env vars ride in via `--env-file`, and secret
+    env vars are forwarded by NAME from the orchestrator's own environment: the
+    hardcoded Anthropic credentials plus the board's `passthroughEnv` names
+    (ticket #7). No secret value is ever written to `_meta.json`, the env-file, or
+    the image — only the name travels, `docker run -e NAME` inherits the value.
     """
     _build_docker_image(kanban_dir, board, log_f)
     env_file = _write_board_env_file(kanban_dir, board, board_meta)
@@ -967,10 +970,36 @@ def _docker_dispatch(kanban_dir, board, task, board_meta, prompt, session_id,
         inner += ["--model", model]
     if allowed:
         inner += ["--allowedTools", ",".join(allowed)]
-    passthrough = [name for name in _DOCKER_PASSTHROUGH_ENV if os.environ.get(name)]
+    passthrough = _resolve_passthrough_env(board_meta, log_f)
     cmd = oc.docker_run_argv(oc.docker_image_tag(board), container_name, mount_src,
                              env_file, inner, passthrough_env=passthrough)
     return cmd, container_name
+
+
+def _resolve_passthrough_env(board_meta, log_f):
+    """Names to forward with bare `docker run -e NAME`, Anthropic defaults first.
+
+    Order (de-duplicated): the hardcoded Anthropic credentials, then the board's
+    `passthroughEnv` secret names (ticket #7). A name is forwarded only when it is
+    actually set in the orchestrator's own environment (present-only) — bare
+    `-e NAME` for an unset var would pass nothing useful. A `passthroughEnv` name
+    that is ABSENT from the orchestrator env is skipped but logged as a warning,
+    so a missing secret is visible rather than silently dropped.
+    """
+    forwarded = [name for name in _DOCKER_PASSTHROUGH_ENV if os.environ.get(name)]
+    seen = set(forwarded)
+    for name in oc.board_passthrough_env(board_meta):
+        if name in seen:
+            continue
+        seen.add(name)
+        if os.environ.get(name):
+            forwarded.append(name)
+        else:
+            log_f.write(f"[docker] passthroughEnv '{name}' is not set in the "
+                        f"orchestrator environment — skipping (this secret will "
+                        f"be absent inside the container)\n")
+            log_f.flush()
+    return forwarded
 
 
 def spawn_agent(kanban_dir, board, task, profile, model):
