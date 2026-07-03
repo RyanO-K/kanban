@@ -1317,6 +1317,7 @@ loadFiles();
 // ── View switching ──────────────────────────────────────────────
 let currentView = "boards";
 function switchView(view){
+  if(currentView === view) return;
   currentView = view;
   document.querySelectorAll(".view-tab").forEach(b=>b.classList.toggle("active", b.dataset.view===view));
   const mainWrap=$("board").parentElement;
