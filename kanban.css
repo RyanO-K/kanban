@@ -72,6 +72,39 @@ body {
 }
 .add-btn:hover { background:#2563eb; transform:translateY(-1px); }
 .add-btn:active { transform:scale(.96) translateY(0); }
+/* Ticket #3: notification bell — entry point for blocked tickets awaiting a human
+   decision. Sits left of the status pill; badge shows the count and hides at zero. */
+.bell-btn {
+  position:relative; display:inline-flex; align-items:center; justify-content:center;
+  width:32px; height:32px; margin-right:10px; padding:0;
+  background:var(--bg); color:var(--text-muted);
+  border:1px solid var(--surface-alt); border-radius:8px; cursor:pointer;
+  transition:background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
+}
+.bell-btn:hover { background:var(--surface-alt); color:var(--text); transform:translateY(-1px); }
+.bell-btn:active { transform:scale(.94); }
+.bell-btn:focus-visible { outline:2px solid #3b82f6; outline-offset:1px; }
+/* When items are pending the bell warms up and gives a gentle swing to draw the eye. */
+.bell-btn.has-alerts { color:#fca5a5; border-color:rgba(239,68,68,.45); }
+.bell-btn.has-alerts .bell-icon { animation:bellSwing 2.6s var(--ease-out) infinite; transform-origin:50% 3px; }
+@keyframes bellSwing {
+  0%,58%,100% { transform:rotate(0); }
+  62% { transform:rotate(11deg); }
+  67% { transform:rotate(-9deg); }
+  72% { transform:rotate(5deg); }
+  77% { transform:rotate(-3deg); }
+  82% { transform:rotate(0); }
+}
+.bell-badge {
+  position:absolute; top:-5px; right:-5px; min-width:16px; height:16px; padding:0 4px;
+  border-radius:999px; background:#ef4444; color:#fff; border:1.5px solid var(--surface);
+  font-size:10px; font-weight:700; line-height:13px; text-align:center;
+}
+.bell-badge[hidden] { display:none; }
+.bell-badge.bump { animation:countPop var(--dur-med) var(--ease-spring); }
+/* Needs-attention modal: a slightly wider, scrollable stack of question cards. */
+#bellModal .modal { width:480px; }
+.bell-inbox { max-height:min(60vh,520px); overflow-y:auto; margin:0 -6px; padding:2px 6px; }
 .view-tabs { display:flex; gap:4px; }
 .view-tab { background:var(--bg); color:var(--text-muted); border:1px solid var(--surface-alt);
   padding:5px 12px; border-radius:6px; font-size:12px; cursor:pointer;

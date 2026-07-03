@@ -6,6 +6,7 @@
 const UI_CONFIG_DEFAULTS = {
   pollMs: 1500,            // board refresh poll interval (ms)
   perfRefreshMs: 3000,     // Performance tab sampling refresh (ms)
+  attentionPollMs: 4000,   // notification-bell (needs-attention) refresh interval (ms)
   newProfileModel: "claude-opus-4-8",                          // default model for a new profile
   newProfileTools: ["Read","Edit","Write","Bash","Grep","Glob"], // default allowed tools for a new profile
 };
@@ -42,6 +43,10 @@ let currentTasks=[], selectedTaskKey=null, currentBoardData=null;
 // card's key + target column so a poll firing mid-move re-renders it into the
 // target column (not its stale source) and never duplicates or drops it.
 let pendingMove=null;
+// Ticket #3: blocked tickets awaiting a human decision, refreshed independently of
+// the board poll so the topbar bell stays accurate on every view. _lastAttention
+// count drives the badge "bump" pop when a new item arrives.
+let attentionTasks=[], _lastAttentionCount=0;
 
 // Unique identifier for a ticket across all boards. The numeric `id` alone
 // collides in the "All" view (each board has its own #1, #2, ...), so use the
@@ -1239,7 +1244,11 @@ $("modalClose").addEventListener("click",closeModal);
 $("cancelBtn").addEventListener("click",()=>{if(dockMode)undock();else closeModal();});
 $("dockBtn").addEventListener("click",()=>{dockMode?(undock(),$("modal").classList.add("open")):dock();});
 $("modal").addEventListener("click",e=>{if(e.target===$("modal"))closeModal();});
-document.addEventListener("keydown",e=>{if(e.key==="Escape"){closeModal();closePanel();}});
+// Notification bell (ticket #3): open/close the Needs-attention modal.
+$("bellBtn").addEventListener("click",openBellModal);
+$("bellModalClose").addEventListener("click",closeBellModal);
+$("bellModal").addEventListener("click",e=>{if(e.target===$("bellModal"))closeBellModal();});
+document.addEventListener("keydown",e=>{if(e.key==="Escape"){closeModal();closeBellModal();closePanel();}});
 
 let taskSubmitInFlight=false;
 $("taskForm").addEventListener("submit",async e=>{
@@ -1330,6 +1339,9 @@ $("boardForm").addEventListener("submit",async e=>{
 
 updateBoardSettingsBtn();
 loadFiles();
+// Ticket #3: keep the topbar bell current independently of which board is selected.
+refreshAttention();
+setInterval(refreshAttention, UI_CONFIG.attentionPollMs);
 
 // ── View switching ──────────────────────────────────────────────
 let currentView = "boards";
@@ -1606,10 +1618,8 @@ async function renderOrchestrator(){
   html += '<div class="sw-row"><label class="sw"><input type="checkbox" id="autoPushToggle"'+(apOn?" checked":"")+(acOn?"":" disabled")+'><span class="sw-track"></span><span class="sw-thumb"></span></label>'
         + '<span class="sw-label" style="'+(acOn?"":"opacity:0.45")+'">Auto-push<small>'+(apOn?"Pushes branch after committing":"Off — commits locally only")+'</small></span></div>';
 
-  // Human-attention inbox.
-  const needsHuman = (all.tasks||[]).filter(t=>t.orchestrator&&t.orchestrator.question&&!t.orchestrator.question.answer);
-  html += '<h2 style="font-size:16px;margin-bottom:10px;">Needs attention ('+needsHuman.length+')</h2>';
-  html += '<div id="inbox"></div>';
+  // Human-attention inbox moved to the topbar notification bell (ticket #3);
+  // answer blocked-ticket questions there. This tab keeps in-flight + activity.
 
   // In-flight with kill buttons.
   const inFlight = (all.tasks||[]).filter(t=>t.orchestrator&&t.orchestrator.state==="dispatched");
@@ -1666,10 +1676,6 @@ async function renderOrchestrator(){
     showToast(val?"Auto-push enabled":"Auto-push disabled"); renderOrchestrator();}
     catch(e){ev.target.checked=!val;showToast("Failed to toggle auto-push",true);}
   });
-
-  const inbox=$("inbox");
-  if(!needsHuman.length) inbox.innerHTML='<div style="color:#475569;font-size:12px;">Nothing needs attention.</div>';
-  needsHuman.forEach(t=>inbox.appendChild(questionCard(t)));
 
   const infl=$("inflight");
   if(!inFlight.length) infl.innerHTML='<div style="color:#475569;font-size:12px;">No agents running.</div>';
@@ -1728,11 +1734,63 @@ function questionCard(t){
       await apiFetch("/api/orchestrator/answer/"+encodeURIComponent(t._board)+"/"+encodeURIComponent(t.id),
         {method:"POST",headers:{"Content-Type":"application/json"},
          body:JSON.stringify({value:getValue(),notes:notes.value.trim()})});
-      showToast("Answer sent"); renderOrchestrator();
+      showToast("Answer sent"); onQuestionAnswered();
     }catch(e){ showToast("Failed to send answer",true); submit.disabled=false; }
   });
   card.appendChild(submit);
   return card;
+}
+
+// ── Notification bell (ticket #3) ───────────────────────────────
+// A blocked ticket needs human input when it carries an unanswered
+// orchestrator.question. refreshAttention() polls all boards for those, updates the
+// topbar badge, and (if open) re-renders the modal. The bell is the single entry
+// point for answering — the same questionCard() the Setup tab used to host inline.
+async function refreshAttention(){
+  let all;
+  try{ all = await apiFetch("/api/board/__all__"); }
+  catch(e){ return; }  // server down — keep last-known count; the status pill shows offline
+  attentionTasks=(all.tasks||[]).filter(t=>t.orchestrator&&t.orchestrator.question&&!t.orchestrator.question.answer);
+  updateBell();
+  if($("bellModal").classList.contains("open")) renderBellInbox();
+}
+
+function updateBell(){
+  const btn=$("bellBtn"), badge=$("bellBadge");
+  if(!btn||!badge) return;
+  const n=attentionTasks.length;
+  btn.classList.toggle("has-alerts", n>0);
+  if(n>0){
+    badge.textContent = n>99 ? "99+" : String(n);
+    badge.hidden=false;
+    if(n>_lastAttentionCount){ badge.classList.remove("bump"); void badge.offsetWidth; badge.classList.add("bump"); }
+    btn.title = n+" blocked ticket"+(n===1?"":"s")+" awaiting your input";
+  } else {
+    badge.hidden=true;
+    btn.title="No tickets need your input";
+  }
+  _lastAttentionCount=n;
+}
+
+function renderBellInbox(){
+  const inbox=$("bellInbox");
+  if(!inbox) return;
+  inbox.innerHTML="";
+  if(!attentionTasks.length){
+    inbox.innerHTML='<div style="color:var(--text-muted);font-size:13px;text-align:center;padding:28px 12px;">&#x2713; All caught up — nothing needs your input.</div>';
+    return;
+  }
+  attentionTasks.forEach(t=>inbox.appendChild(questionCard(t)));
+}
+
+function openBellModal(){ renderBellInbox(); $("bellModal").classList.add("open"); }
+function closeBellModal(){ $("bellModal").classList.remove("open"); }
+
+// After an answer is submitted (from the bell modal), re-poll attention and, if the
+// Setup tab is showing, refresh its in-flight/activity view too.
+function onQuestionAnswered(){
+  refreshAttention();
+  if(currentView==="setup" && window.renderOrchestrator) renderOrchestrator();
 }
 
 // Ticket #66: keep the fixed-height layout in sync with the real top-bar height.

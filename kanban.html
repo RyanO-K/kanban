@@ -20,6 +20,15 @@
   <button class="add-btn" id="markAllReadBtn" style="display:none;background:var(--surface-alt);color:var(--text);" title="Mark all unread tickets as read">&#x2713; Mark all read</button>
   <button class="add-btn" id="addBtn">+ New Task</button>
   <div class="status-indicator">
+    <!-- Ticket #3: notification bell — count of blocked tickets awaiting a human
+         decision. Badge hidden at 0; click opens the Needs-attention modal. -->
+    <button class="bell-btn" id="bellBtn" type="button" aria-label="Blocked tickets needing input" title="No tickets need your input">
+      <svg class="bell-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"></path>
+        <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
+      </svg>
+      <span class="bell-badge" id="bellBadge" hidden>0</span>
+    </button>
     <div class="status-pill" id="statusPill" title="Connecting&#x2026;" tabindex="0">
       <span class="dot" id="dot"></span>
       <span id="statusText">connecting&#x2026;</span>
@@ -156,6 +165,18 @@
         <button type="submit" class="btn btn-create">Save</button>
       </div>
     </form>
+  </div>
+</div>
+
+<!-- Needs-attention Modal (ticket #3): blocked tickets awaiting a human decision.
+     Populated by renderBellInbox() with one questionCard per pending ticket. -->
+<div class="modal-overlay" id="bellModal">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>Needs attention</h2>
+      <button class="modal-close" id="bellModalClose">&times;</button>
+    </div>
+    <div class="bell-inbox" id="bellInbox"></div>
   </div>
 </div>
 
