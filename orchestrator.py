@@ -195,6 +195,23 @@ def kill_pid(pid):
         return False
 
 
+def _kill_container(name):
+    """Best-effort `docker kill` of a named container (ticket #16).
+
+    A Docker-mode agent runs inside a container; killing the host `docker run`
+    client does not necessarily stop the container, so reap/kill also tears the
+    container down by name. No-op for a falsy name; never raises (Docker missing
+    or the container already gone is fine).
+    """
+    if not name:
+        return False
+    try:
+        subprocess.run(["docker", "kill", name], capture_output=True)
+        return True
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
+
+
 def _release_proc(pid):
     """Close the log handle and remove pid from the registry.
 
@@ -297,7 +314,7 @@ def repo_dir_for_paths(kanban_dir, paths):
 
       - All under `.kanban/`  -> the `.kanban` directory (its own repo; this is the
         "kanban lives on master" tree).
-      - All under one sibling top-level dir (e.g. `barnumHardis2/...`) -> that
+      - All under one sibling top-level dir (e.g. `acme-sfdx2/...`) -> that
         sub-repo's directory: we `cd` into the checked-out repo and commit there.
       - Empty, or spanning two different sub-repos (can't pick one) -> fall back to
         the workspace root (prior behavior; the best-effort git call just no-ops on
@@ -849,6 +866,107 @@ def _claude_cmd():
     return shutil.which("claude") or "claude"
 
 
+def _probe_fable_available(timeout=10):
+    """Probe whether claude-fable-5 is available by asking the CLI for its model list.
+
+    Returns True if the probe exits 0, False otherwise (model not yet available,
+    CLI error, or timeout). Best-effort: any exception → False so a probe failure
+    never blocks dispatch.
+    """
+    try:
+        result = _run_tracked(
+            ["claude", "--model", oc.FABLE_MODEL, "-p", "", "--max-tokens", "1"],
+            "Probing fable availability",
+            capture_output=True, text=True, timeout=timeout,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _docker_dir(kanban_dir):
+    """Directory holding the workspace Dockerfile and generated per-board env files.
+
+    Lives under `_orchestrator/` (excluded from board scans). The Dockerfile is a
+    checked-in template; the `env/` subdir holds one rendered `--env-file` per board.
+    """
+    return os.path.join(os.path.abspath(kanban_dir), "_orchestrator", "docker")
+
+
+def _write_board_env_file(kanban_dir, board, board_meta):
+    """Render the board's editable env vars to a `--env-file`, returning its path.
+
+    Always writes a file (possibly empty) so `docker run --env-file` has a target;
+    the file is per-board so concurrent tickets on different boards don't collide.
+    """
+    env_dir = os.path.join(_docker_dir(kanban_dir), "env")
+    os.makedirs(env_dir, exist_ok=True)
+    path = os.path.join(env_dir, f"{oc._docker_safe(board)}.env")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(oc.render_env_file(oc.board_env_vars(board_meta)))
+    return path
+
+
+def _build_docker_image(kanban_dir, board, log_f):
+    """Build (or refresh via layer cache) the board's workspace image.
+
+    Best-effort: streams build output to the agent's run log and returns True on a
+    clean build, False if Docker is missing or the build fails. A failed build is
+    not fatal here — `spawn_agent` still issues `docker run`, whose own failure is
+    captured in the same log and reaped as a crash, surfacing the problem to a human.
+    """
+    docker_dir = _docker_dir(kanban_dir)
+    dockerfile = os.path.join(docker_dir, "Dockerfile")
+    if not os.path.isfile(dockerfile):
+        log_f.write(f"[docker] no Dockerfile at {dockerfile}; skipping image build\n")
+        log_f.flush()
+        return False
+    argv = oc.docker_build_argv(oc.docker_image_tag(board), dockerfile, docker_dir)
+    log_f.write(f"[docker] building image: {' '.join(argv)}\n")
+    log_f.flush()
+    try:
+        result = subprocess.run(argv, stdout=log_f, stderr=subprocess.STDOUT,
+                                cwd=docker_dir)
+        return result.returncode == 0
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        log_f.write(f"[docker] build could not run (is Docker installed?): {exc}\n")
+        log_f.flush()
+        return False
+
+
+# Host env vars forwarded into the container so credentials (chiefly the API key)
+# never have to be written into _meta.json. Present-only: a bare `-e NAME` passes
+# the orchestrator's own value through, and absent names are simply not forwarded.
+_DOCKER_PASSTHROUGH_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
+                           "ANTHROPIC_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN")
+
+
+def _docker_dispatch(kanban_dir, board, task, board_meta, prompt, session_id,
+                     model, allowed, log_f):
+    """Build the `docker run` argv (and container name) for an in-container agent.
+
+    Mounts the workspace root at `/workspace`, so the agent sees both its board
+    repo and the `.AI-kanban` tree; the prompt's host paths are translated onto
+    that mount. The board's editable env vars ride in via `--env-file`, and known
+    credential env vars are forwarded from the orchestrator's own environment.
+    """
+    _build_docker_image(kanban_dir, board, log_f)
+    env_file = _write_board_env_file(kanban_dir, board, board_meta)
+    mount_src = _repo_root(kanban_dir)  # workspace root -> /workspace
+    container_name = oc.docker_container_name(board, task)
+    inner_prompt = oc.translate_host_paths(prompt, mount_src)
+    inner = ["claude", "-p", inner_prompt, "--session-id", session_id,
+             "--output-format", "stream-json", "--verbose"]
+    if model:
+        inner += ["--model", model]
+    if allowed:
+        inner += ["--allowedTools", ",".join(allowed)]
+    passthrough = [name for name in _DOCKER_PASSTHROUGH_ENV if os.environ.get(name)]
+    cmd = oc.docker_run_argv(oc.docker_image_tag(board), container_name, mount_src,
+                             env_file, inner, passthrough_env=passthrough)
+    return cmd, container_name
+
+
 def spawn_agent(kanban_dir, board, task, profile, model):
     # Resolve to an absolute path so the run dir and cwd are always valid.
     # (os.path.dirname(".") is "" — an invalid cwd that raises WinError 123.)
@@ -870,17 +988,34 @@ def spawn_agent(kanban_dir, board, task, profile, model):
     # `claude --resume <id>` to take over a blocked/stuck ticket manually.
     session_id = str(uuid.uuid4())
 
+    # Fable 5 may not always be available; probe and fall back to opus if needed.
+    if model == oc.FABLE_MODEL:
+        model = oc.resolve_model(model, fable_available=_probe_fable_available())
+
     board_meta = oc.read_board_meta(kanban_dir, board)
     prompt = _build_agent_prompt(task, profile, board_meta)
-    cmd = [_claude_cmd(), "-p", prompt, "--session-id", session_id,
-           "--output-format", "stream-json", "--verbose"]
-    if model:
-        cmd += ["--model", model]
     allowed = profile.get("allowedTools")
-    if allowed:
-        cmd += ["--allowedTools", ",".join(allowed)]
 
     log_f = open(log_path, "w", encoding="utf-8")
+
+    # Two dispatch modes (ticket #16):
+    #   - Docker (per-board `useDocker`): build the board's workspace image and run
+    #     the agent INSIDE a container mounted on the workspace root, with the
+    #     board's editable env vars supplied via `--env-file`.
+    #   - Default: run `claude -p` as a plain host subprocess in the workspace root.
+    container_name = None
+    if oc.use_docker(board_meta):
+        cmd, container_name = _docker_dispatch(
+            kanban_dir, board, task, board_meta, prompt, session_id, model,
+            allowed, log_f)
+    else:
+        cmd = [_claude_cmd(), "-p", prompt, "--session-id", session_id,
+               "--output-format", "stream-json", "--verbose"]
+        if model:
+            cmd += ["--model", model]
+        if allowed:
+            cmd += ["--allowedTools", ",".join(allowed)]
+
     # On POSIX, put the agent in its own session/process group so kill_pid can
     # take down the whole child tree via os.killpg (Windows uses taskkill /T).
     popen_kw = {} if sys.platform == "win32" else {"start_new_session": True}
@@ -890,7 +1025,7 @@ def spawn_agent(kanban_dir, board, task, profile, model):
     proc._log_f = log_f
     # Register the Popen so _exit_code / _process_alive can use it.
     _PROCS[proc.pid] = proc
-    return {
+    marker = {
         "state": "dispatched",
         "profile": profile.get("name"),
         "model": model,
@@ -901,6 +1036,11 @@ def spawn_agent(kanban_dir, board, task, profile, model):
         "killRequested": False,
         "logFile": f".kanban/_orchestrator/runs/{log_name}",
     }
+    # Record the container name so reap/kill can `docker kill` it by name even
+    # after a loop restart (when we no longer hold the client Popen).
+    if container_name:
+        marker["containerName"] = container_name
+    return marker
 
 
 def _build_agent_prompt(task, profile, board_meta=None):
@@ -1105,15 +1245,9 @@ def _summarize_progress(kanban_dir, task, reason):
             return summary
     except (subprocess.SubprocessError, OSError, ValueError):
         pass
-    # Fallback: the model was unavailable. Leave whatever last-known progress we
-    # have for a human to read. When the log is empty, say so explicitly (rather
-    # than a bare "(no log output)") and surface the prior comments instead.
-    if tail:
-        return ("Could not interpret progress (summarizer unavailable). "
-                "Last log tail before kill:\n" + tail)
-    return ("Could not interpret progress (summarizer unavailable). The agent "
-            "produced no log output before the kill. Last ticket comments:\n"
-            + (comments or "(none)"))
+    # Fallback: the model was unavailable. The raw log is visible in the UI logs
+    # panel, so we no longer embed it here.
+    return "Could not interpret progress (summarizer unavailable). See the run log for details."
 
 
 def tick(kanban_dir, *, opus_triage, summarize_progress=None, initial_triage=None):
@@ -1151,6 +1285,7 @@ def tick(kanban_dir, *, opus_triage, summarize_progress=None, initial_triage=Non
             if m and m.get("state") == "dispatched":
                 pid = m.get("pid")
                 kill_pid(pid)
+                _kill_container(m.get("containerName"))
                 if pid:
                     _release_proc(pid)
                 # Re-read fresh so the killed agent's last comments survive our
@@ -1238,6 +1373,7 @@ def tick(kanban_dir, *, opus_triage, summarize_progress=None, initial_triage=Non
                          + summarize_progress(kanban_dir, t, "kill"))
             write_task(t["_path"], t)
             kill_pid(pid)
+            _kill_container(m.get("containerName"))
             if pid:
                 _release_proc(pid)
             _add_comment(t, "Killed by request.")
@@ -1290,7 +1426,7 @@ def tick(kanban_dir, *, opus_triage, summarize_progress=None, initial_triage=Non
                     "ts": oc.now_iso(), "kind": "usage_limit", "board": t["_board"],
                     "ticket": t["id"], "pausedUntil": until})
                 continue
-            _add_comment(t, "NEEDS HUMAN: agent exited unexpectedly.\n" + tail)
+            _add_comment(t, "NEEDS HUMAN: agent exited unexpectedly. See the run log for details.")
             _finish_blocked(kanban_dir, t, "error")
         elif action == "stalled":
             # Interpret + record the agent's progress BEFORE reaping it.
@@ -1298,6 +1434,7 @@ def tick(kanban_dir, *, opus_triage, summarize_progress=None, initial_triage=Non
                          + summarize_progress(kanban_dir, t, "stalled"))
             write_task(t["_path"], t)
             kill_pid(pid)
+            _kill_container(m.get("containerName"))
             if pid:
                 _release_proc(pid)
             _add_comment(t, "Reaped: no progress (stalled).")
@@ -1503,6 +1640,7 @@ def _real_sonnet_triage(kanban_dir, task, all_tasks, model=None, timeout=60):
         "Reply with ONLY a JSON object — no prose, no markdown fences. Shape:\n"
         '{"dependsOn": ["<id>", ...], "model": "<model-id>"}\n'
         "Use an empty list for dependsOn if there are none. Model choices: "
+        "claude-fable-5 (complex creative/reasoning tasks — preferred for hard work), "
         "claude-opus-4-8 (complex/long tasks), claude-sonnet-4-6 (default), "
         "claude-haiku-4-5-20251001 (simple/fast tasks)."
     )

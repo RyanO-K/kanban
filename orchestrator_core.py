@@ -19,6 +19,12 @@ CONFIG_DIR = os.path.join(KANBAN_DIR, "config")
 # the highest-frequency background cost. Empty/missing falls back to this default.
 DEFAULT_LOOP_MODEL = "claude-opus-4-8"
 
+# Fable 5 is a model option for sub-agents but may not always be available.
+# When selected, the orchestrator probes availability at dispatch time and
+# substitutes FABLE_FALLBACK_MODEL if the model is not accessible.
+FABLE_MODEL = "claude-fable-5"
+FABLE_FALLBACK_MODEL = "claude-opus-4-8"
+
 DEFAULT_STATE = {"enabled": False, "concurrencyCap": 3,
                  "stopAllRequested": False, "idleSeconds": 600,
                  "tickSeconds": 60, "maxAgentSeconds": 0, "triageTimeoutSeconds": 120,
@@ -277,6 +283,180 @@ def auto_push_enabled(state):
     `autoCommit`: turning push off keeps local commits; turning commit off skips both.
     """
     return _coerce_bool((state or {}).get("autoPush"), True)
+
+
+# --- Docker dev-workspace support (ticket #16) ---
+#
+# Option A of the containerization ticket: instead of running the dispatched
+# `claude -p` agent as a plain host subprocess, the orchestrator can build one
+# Docker image per board repo and run the agent INSIDE a container mounted on
+# the workspace. Env vars for that container are editable per-board (Project
+# Settings -> stored as `envVars` on _meta.json) and handed to the container via
+# a rendered `--env-file`. Everything in this section is pure argv/text/config
+# logic so it is unit-testable on any host — the real `docker build`/`docker run`
+# calls live in orchestrator.py.
+
+# Image repository namespace; the board slug becomes the tag.
+DOCKER_IMAGE_PREFIX = "ai-kanban-workspace"
+# Path INSIDE the container where the workspace root (parent of .AI-kanban) is
+# mounted. The agent's prompt carries host paths; we translate them onto this.
+CONTAINER_WORKSPACE = "/workspace"
+
+# A valid POSIX/shell environment-variable name: letter/underscore then
+# letters/digits/underscores. Anything else can't be a real env var and is
+# dropped so a malformed settings payload can't inject junk into the container.
+_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def use_docker(board_meta):
+    """Whether this board's agents run inside a per-repo Docker container (ticket #16).
+
+    Per-project setting persisted on the board's `_meta.json` as `useDocker`
+    (toggled from the Project Settings page). Defaults to False so existing
+    boards are unaffected — the agent keeps running as a plain host subprocess.
+    Tolerates a stringified bool from a form control, like `use_worktrees`.
+    """
+    return _coerce_bool((board_meta or {}).get("useDocker"), False)
+
+
+def valid_env_key(key):
+    """True if `key` is a usable environment-variable name."""
+    return isinstance(key, str) and bool(_ENV_KEY_RE.match(key))
+
+
+def board_env_vars(board_meta):
+    """Sanitized `{KEY: VALUE}` env map from a board's `envVars` (ticket #16).
+
+    Only entries whose key is a valid env-var name survive; scalar values
+    (str/int/float/bool) are coerced to their string form and `None` is dropped.
+    Any other shape is ignored, so a malformed Project-Settings payload can never
+    put non-string junk into the container environment.
+    """
+    raw = (board_meta or {}).get("envVars")
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    for key, value in raw.items():
+        if not valid_env_key(key):
+            continue
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            value = "true" if value else "false"
+        elif isinstance(value, (int, float)):
+            value = str(value)
+        if not isinstance(value, str):
+            continue
+        out[key] = value
+    return out
+
+
+def render_env_file(env):
+    """Render an env map to Docker `--env-file` text: one `KEY=VALUE` per line.
+
+    The `--env-file` format is line-based, so a newline in a value would corrupt
+    the file; carriage returns are dropped and newlines flattened to spaces. Keys
+    are assumed already validated by `board_env_vars`. Returns "" for an empty map
+    (Docker accepts an empty env-file).
+    """
+    lines = []
+    for key, value in (env or {}).items():
+        flat = str(value).replace("\r", "").replace("\n", " ")
+        lines.append(f"{key}={flat}")
+    return ("\n".join(lines) + "\n") if lines else ""
+
+
+def _docker_safe(name):
+    """Lowercase `name` to a Docker-safe token (image-tag / container-name part).
+
+    Docker repository tags and container names allow only a restricted charset;
+    everything outside `[a-z0-9_.-]` collapses to a single '-', and leading/
+    trailing separators are trimmed. Empty input yields 'workspace' so the result
+    is always a valid, non-empty token.
+    """
+    safe = re.sub(r"[^a-z0-9_.-]+", "-", (name or "").lower()).strip("-._")
+    return safe or "workspace"
+
+
+def docker_image_tag(board):
+    """The image tag built for a board repo, e.g. `ai-kanban-workspace:demo`."""
+    return f"{DOCKER_IMAGE_PREFIX}:{_docker_safe(board)}"
+
+
+def docker_container_name(board, task):
+    """The container name for a board+ticket run, e.g. `ai-kanban-workspace-demo-16`.
+
+    Deterministic so the orchestrator can `docker kill` it by name on reap even
+    after a loop restart (when it no longer holds the client Popen). Falls back to
+    the board-only name when the ticket has no id.
+    """
+    raw = str((task or {}).get("id", "")).strip()
+    base = f"{DOCKER_IMAGE_PREFIX}-{_docker_safe(board)}"
+    return f"{base}-{_docker_safe(raw)}" if raw else base
+
+
+def translate_host_paths(text, host_root, container_root=CONTAINER_WORKSPACE):
+    """Rewrite host workspace-root paths in `text` onto the container mount.
+
+    Inside the container only the workspace root is mounted (at `container_root`),
+    so a host path like `C:\\Users\\me\\Github\\.AI-kanban\\demo\\16.json` in the
+    agent prompt must become `/workspace/.AI-kanban/demo/16.json`. We match the
+    host root in both its native and forward-slash forms and normalize the
+    backslashes in the matched tail. Best-effort: if `host_root` is empty or never
+    appears, the text is returned unchanged.
+    """
+    if not host_root or not text:
+        return text
+    root = os.path.abspath(host_root).rstrip("\\/")
+    variants = {root, root.replace("\\", "/")}
+    result = text
+    for variant in sorted(variants, key=len, reverse=True):
+        if not variant:
+            continue
+        idx = result.find(variant)
+        while idx != -1:
+            end = idx + len(variant)
+            # Consume the path tail (until whitespace) and flip its separators.
+            tail_end = end
+            while tail_end < len(result) and not result[tail_end].isspace():
+                tail_end += 1
+            tail = result[end:tail_end].replace("\\", "/")
+            replacement = container_root + tail
+            result = result[:idx] + replacement + result[tail_end:]
+            idx = result.find(variant, idx + len(replacement))
+    return result
+
+
+def docker_build_argv(image_tag, dockerfile_path, context_dir):
+    """The `docker build` argv that produces a board's workspace image."""
+    return ["docker", "build", "-t", image_tag,
+            "-f", dockerfile_path, context_dir]
+
+
+def docker_run_argv(image_tag, container_name, mount_src, env_file, inner_argv,
+                    container_workdir=CONTAINER_WORKSPACE, passthrough_env=None):
+    """The `docker run` argv that runs `inner_argv` inside the workspace image.
+
+    - `--rm` so the container is discarded on exit (its work is on the mounted
+      volume, persisted to the host).
+    - `--name` fixes the container name so reap can `docker kill` it by name.
+    - `-v mount_src:/workspace` mounts the whole workspace root, giving the agent
+      both its board repo and the `.AI-kanban` tree (its ticket JSON lives there).
+    - `--env-file` supplies the board's editable env vars.
+    - `passthrough_env` names host env vars to forward with bare `-e NAME`
+      (value inherited from the orchestrator's own environment) — used for
+      secrets like `ANTHROPIC_API_KEY` that shouldn't be written into _meta.json.
+    """
+    argv = ["docker", "run", "--rm", "--name", container_name,
+            "-v", f"{mount_src}:{CONTAINER_WORKSPACE}",
+            "-w", container_workdir]
+    if env_file:
+        argv += ["--env-file", env_file]
+    for name in (passthrough_env or []):
+        argv += ["-e", name]
+    argv.append(image_tag)
+    argv += list(inner_argv)
+    return argv
 
 
 def safe_name(name):
@@ -567,6 +747,19 @@ def delete_profile(kanban_dir, name):
         return True
     except OSError:
         return False
+
+
+def resolve_model(model, *, fable_available):
+    """Resolve a requested model, substituting the fable fallback when needed.
+
+    When `model` is FABLE_MODEL and `fable_available` is False, returns
+    FABLE_FALLBACK_MODEL (opus). All other models pass through unchanged.
+    `fable_available` is injected by the caller (orchestrator.py probes the CLI)
+    so this function stays pure and unit-testable.
+    """
+    if model == FABLE_MODEL and not fable_available:
+        return FABLE_FALLBACK_MODEL
+    return model
 
 
 # --- ticket orchestrator marker ---

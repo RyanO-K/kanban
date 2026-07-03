@@ -5,7 +5,7 @@ import sys
 import pytest
 
 # Make the .kanban dir importable (orchestrator_core.py lives there).
-KANBAN_SRC = os.path.dirname(os.path.abspath(__file__))
+KANBAN_SRC = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, KANBAN_SRC)
 
 

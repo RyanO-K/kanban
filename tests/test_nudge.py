@@ -113,13 +113,16 @@ def test_nudge_returns_queued_true_when_no_thread(server, monkeypatch):
 
 def test_nudge_button_on_boards_page():
     """The nudge button should appear in the topbar on the boards page."""
-    # Load the HTML file and verify nudgeBoardBtn exists.
     import pathlib
-    html_path = pathlib.Path(__file__).parent.parent / "kanban.html"
+    root = pathlib.Path(__file__).parent.parent
+    html_path = root / "kanban.html"
+    js_path = root / "kanban.js"
     with open(html_path, "r", encoding="utf-8") as f:
         html = f.read()
+    with open(js_path, "r", encoding="utf-8") as f:
+        js = f.read()
 
-    # Button should exist with id="nudgeBoardBtn" on the topbar
+    # Button element should exist in the HTML with id="nudgeBoardBtn"
     assert re.search(r'id="nudgeBoardBtn"', html), (
         "nudgeBoardBtn not found in HTML — expected on topbar"
     )
@@ -128,26 +131,26 @@ def test_nudge_button_on_boards_page():
     assert "nudgeBtn" not in html, (
         "old nudgeBtn reference should be removed from HTML"
     )
-    # Button should have event handler in JavaScript.
-    assert re.search(r'\$\("nudgeBoardBtn"\)\.addEventListener', html), (
-        "nudgeBoardBtn event handler not found"
+    # Event handler lives in the external JS file.
+    assert re.search(r'\$\("nudgeBoardBtn"\)\.addEventListener', js), (
+        "nudgeBoardBtn event handler not found in kanban.js"
     )
 
 
 def test_nudge_button_calls_api():
     """The nudge button handler should POST to /api/orchestrator/nudge."""
     import pathlib
-    html_path = pathlib.Path(__file__).parent.parent / "kanban.html"
-    with open(html_path, "r", encoding="utf-8") as f:
-        html = f.read()
+    js_path = pathlib.Path(__file__).parent.parent / "kanban.js"
+    with open(js_path, "r", encoding="utf-8") as f:
+        js = f.read()
 
     # Extract the nudgeBoardBtn click handler to verify it calls the right endpoint.
     handler_match = re.search(
         r'\$\("nudgeBoardBtn"\)\.addEventListener\("click",async\s*\(\)=>\{([^}]+)\}\)',
-        html,
+        js,
         re.DOTALL
     )
-    assert handler_match, "Could not find nudgeBoardBtn event handler"
+    assert handler_match, "Could not find nudgeBoardBtn event handler in kanban.js"
     handler_code = handler_match.group(1)
     assert "/api/orchestrator/nudge" in handler_code, (
         "Handler should POST to /api/orchestrator/nudge"

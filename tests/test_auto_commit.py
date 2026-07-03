@@ -230,7 +230,7 @@ def test_completed_non_kanban_changes_still_use_branch_publish(kanban, monkeypat
 # --- ticket #38: commit inside the repo the changed files live in ---
 #
 # The workspace root (.kanban's parent) is NOT a git repo — each repo is either
-# `.kanban` itself or a sibling sub-directory (barnumHardis2, B2-SF, ...). Git
+# `.kanban` itself or a sibling sub-directory (acme-sfdx2, other-sfdx, ...). Git
 # must run inside the repo the changes live in, not at the (non-repo) root.
 
 def test_repo_dir_for_paths_kanban_only_is_kanban_repo(kanban):
@@ -242,8 +242,8 @@ def test_repo_dir_for_paths_kanban_only_is_kanban_repo(kanban):
 def test_repo_dir_for_paths_subrepo(kanban):
     """Changes under a sibling sub-repo commit from inside that sub-repo dir."""
     root = os.path.dirname(os.path.abspath(kanban))
-    paths = ["barnumHardis2/force-app/X.cls", "barnumHardis2/README.md"]
-    assert orch.repo_dir_for_paths(kanban, paths) == os.path.join(root, "barnumHardis2")
+    paths = ["acme-sfdx2/force-app/X.cls", "acme-sfdx2/README.md"]
+    assert orch.repo_dir_for_paths(kanban, paths) == os.path.join(root, "acme-sfdx2")
 
 
 def test_repo_dir_for_paths_empty_falls_back_to_workspace_root(kanban):
@@ -253,7 +253,7 @@ def test_repo_dir_for_paths_empty_falls_back_to_workspace_root(kanban):
 
 def test_repo_dir_for_paths_multiple_subrepos_falls_back(kanban):
     """Changes spanning two different sub-repos can't pick one — fall back to root."""
-    paths = ["barnumHardis2/a.cls", "B2-SF/b.cls"]
+    paths = ["acme-sfdx2/a.cls", "other-sfdx/b.cls"]
     assert orch.repo_dir_for_paths(kanban, paths) == orch._repo_root(kanban)
 
 
@@ -263,20 +263,20 @@ def test_discover_changed_paths_aggregates_across_repos(kanban, monkeypatch):
     root = os.path.dirname(os.path.abspath(kanban))
     # Mark .kanban and a sibling sub-repo as git repos; leave a non-repo dir too.
     os.makedirs(os.path.join(kanban, ".git"), exist_ok=True)
-    os.makedirs(os.path.join(root, "barnumHardis2", ".git"), exist_ok=True)
+    os.makedirs(os.path.join(root, "acme-sfdx2", ".git"), exist_ok=True)
     os.makedirs(os.path.join(root, "not-a-repo"), exist_ok=True)
 
     def fake_changed(cwd):
         cwd = os.path.abspath(cwd)
         if cwd == os.path.abspath(kanban):
             return ["demo/1.json"]
-        if cwd == os.path.join(root, "barnumHardis2"):
+        if cwd == os.path.join(root, "acme-sfdx2"):
             return ["force-app/X.cls"]
         return []
 
     monkeypatch.setattr(orch, "changed_paths", fake_changed)
     got = set(orch.discover_changed_paths(kanban))
-    assert got == {".kanban/demo/1.json", "barnumHardis2/force-app/X.cls"}
+    assert got == {".kanban/demo/1.json", "acme-sfdx2/force-app/X.cls"}
 
 
 def test_commit_to_master_commits_inside_kanban_repo(kanban, monkeypatch):
@@ -309,11 +309,11 @@ def test_publish_output_branch_runs_inside_subrepo(kanban, monkeypatch):
 
     monkeypatch.setattr(orch, "_run_git", fake_git)
     monkeypatch.setattr(orch, "_default_branch_ref", lambda cwd: "main")
-    monkeypatch.setattr(orch, "discover_changed_paths", lambda kd: ["barnumHardis2/x.cls"])
+    monkeypatch.setattr(orch, "discover_changed_paths", lambda kd: ["acme-sfdx2/x.cls"])
     task = {"id": "1", "title": "First", "_board": "demo"}
     orch.publish_output_branch(kanban, task, "ticket/1-first")
     assert cwds, "git must have run"
-    assert all(c == os.path.join(root, "barnumHardis2") for c in cwds), \
+    assert all(c == os.path.join(root, "acme-sfdx2") for c in cwds), \
         "branch publish must run inside the sub-repo, not the workspace root"
 
 

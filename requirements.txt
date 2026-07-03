@@ -1,0 +1,6 @@
+# Core dependencies for the kanban board
+# Python 3.7+
+
+# Optional: Performance monitoring in the UI
+# Uncomment to enable the Performance tab in the kanban web UI
+# psutil>=5.8.0

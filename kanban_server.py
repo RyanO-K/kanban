@@ -78,6 +78,8 @@ def allowed_origin(origin):
 # This script lives directly inside .kanban/, so the board root is its own dir.
 KANBAN_DIR = os.path.dirname(os.path.abspath(__file__))
 HTML_PATH = os.path.join(KANBAN_DIR, "kanban.html")
+CSS_PATH = os.path.join(KANBAN_DIR, "kanban.css")
+JS_PATH = os.path.join(KANBAN_DIR, "kanban.js")
 META_FILE = "_meta.json"
 # Specs / plans live as markdown under .kanban/docs/. A doc associates itself
 # with a ticket via a `**Ticket:** `.kanban/<board>/<id>.json`` line in its header
@@ -132,7 +134,7 @@ KANBAN_GUIDE = (
     "conventions, server API) and this ticket's sibling _meta.json (project context). "
     "Tickets are JSON; agents read and edit them in place. "
     "Reusable skills for board work live in .kanban/skills/<skill-name>/SKILL.md "
-    "(e.g. create-promotion-prs for raising barnumHardis promotion PRs from the CLI); "
+    "(e.g. create-promotion-prs for raising acme-sfdx promotion PRs from the CLI); "
     "read the relevant SKILL.md before doing a task it covers."
 )
 
@@ -505,7 +507,7 @@ def load_board(slug):
     }
     # Pass through optional board-level metadata if present.
     for key in ("context", "openQuestions", "outOfScope", "commitRequirements",
-                "directory", "useWorktrees"):
+                "directory", "useWorktrees", "useDocker", "envVars"):
         if key in meta:
             result[key] = meta[key]
     # Surface the one-paragraph context blurb as a flat field for the settings
@@ -520,10 +522,14 @@ def load_board(slug):
 # commits/completes work (e.g. "all tests must pass") — agents read it from
 # _meta.json. `directory` is the project's working directory on disk.
 # `useWorktrees` is the per-project boolean (ticket #40) gating whether tickets
-# are worked in a git worktree or in place on a branch. The flat `description`
-# field is handled specially (merged into `context.description`).
+# are worked in a git worktree or in place on a branch. `useDocker` +
+# `envVars` (ticket #16) gate/configure running the agent inside a per-repo
+# Docker container. The flat `description` field is handled specially (merged
+# into `context.description`); `envVars` is sanitized specially (a dict, not a
+# scalar) just below.
 EDITABLE_META_FIELDS = ("project", "context", "openQuestions", "outOfScope",
-                        "commitRequirements", "directory", "useWorktrees")
+                        "commitRequirements", "directory", "useWorktrees",
+                        "useDocker", "envVars")
 
 
 def update_board_meta(slug, payload):
@@ -550,6 +556,16 @@ def update_board_meta(slug, payload):
         if key not in payload:
             continue
         value = payload[key]
+        # `envVars` is a {KEY: VALUE} map (ticket #16), not a scalar: sanitize it
+        # through the same core logic the orchestrator uses (drop invalid keys /
+        # non-scalar values) and remove the field entirely when nothing survives.
+        if key == "envVars":
+            clean = _oc.board_env_vars({"envVars": value})
+            if clean:
+                meta[key] = clean
+            else:
+                meta.pop(key, None)
+            continue
         if isinstance(value, str):
             value = value.strip()
         if value == "" or value is None:
@@ -1085,6 +1101,9 @@ def orch_kill(board, task_id):
         import orchestrator as _orch
         if pid and _orch._process_alive(pid):
             _orch.kill_pid(pid)
+            # Docker-mode agents (ticket #16) run inside a container; killing the
+            # host client isn't enough, so tear the container down by name too.
+            _orch._kill_container(marker.get("containerName"))
             killed_directly = True
     except ImportError:
         pass
@@ -1343,6 +1362,10 @@ class KanbanHandler(BaseHTTPRequestHandler):
                 self._text(text)
         elif path in ("/", "/index.html"):
             self._serve_html()
+        elif path == "/kanban.css":
+            self._serve_static(CSS_PATH, "text/css; charset=utf-8")
+        elif path == "/kanban.js":
+            self._serve_static(JS_PATH, "application/javascript; charset=utf-8")
         else:
             self.send_error(404)
 
@@ -1560,6 +1583,19 @@ class KanbanHandler(BaseHTTPRequestHandler):
             self._safe_write(body)
         except FileNotFoundError:
             self.send_error(504, "kanban.html not found")
+
+    def _serve_static(self, path, content_type):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                text = f.read()
+            body = text.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self._safe_write(body)
+        except FileNotFoundError:
+            self.send_error(404)
 
     def log_message(self, format, *args):
         pass

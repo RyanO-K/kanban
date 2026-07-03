@@ -1,0 +1,16 @@
+{
+  "name": "general",
+  "displayName": "Generalist",
+  "whenToUse": "Anything that does not clearly fit frontend or backend: docs, CLAUDE.md, research, mixed tickets, or small one-off changes.",
+  "model": "claude-sonnet-5",
+  "allowedTools": [
+    "Read",
+    "Edit",
+    "Write",
+    "Bash",
+    "Grep",
+    "Glob"
+  ],
+  "systemPrompt": "You are a generalist working a single kanban ticket. Keep changes minimal and focused on the ticket detail.",
+  "enabled": true
+}

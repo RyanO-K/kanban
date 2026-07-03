@@ -85,7 +85,7 @@ the board **and** discoverable by every worker (a skill buried in a sub-repo's
 
 Current skills:
 
-- **`create-promotion-prs`** — raise `barnumHardis` promotion PRs from the CLI by
+- **`create-promotion-prs`** — raise `acme-sfdx` promotion PRs from the CLI by
   dispatching `manual-create-promotion-prs.yml` via `gh workflow run` (instead of opening a
   throwaway PR into `partial`). See `.kanban/skills/create-promotion-prs/SKILL.md`.
 
@@ -202,7 +202,7 @@ recorded in a ticket comment.
 > `cd`s into the repo the changed files actually live in and commits from there
 > (`discover_changed_paths` walks each sub-repo, prefixing its `git status --porcelain` paths
 > with the repo dir name; `repo_dir_for_paths` then maps a change set back to its repo —
-> `.kanban/…` → the `.kanban` repo, `barnumHardis2/…` → that sub-repo). A change set spanning
+> `.kanban/…` → the `.kanban` repo, `acme-sfdx2/…` → that sub-repo). A change set spanning
 > two different sub-repos can't pick one and falls back to the (no-op) root.
 
 ## Orchestrator
@@ -223,6 +223,16 @@ triage prompt (`orchestrator_triage_prompt.md`).
 - **Control state** is `.kanban/_orchestrator/state.json` (`enabled`, `concurrencyCap`,
   `stopAllRequested`), toggled from the **Orchestrator** tab. `enabled:false` pauses new
   dispatch (reaping still runs); "Stop all" kills everything in flight.
+- **Docker dev-workspace (ticket #16).** A board can set `useDocker: true` (Project
+  Settings) to run its dispatched agent INSIDE a per-repo Docker container instead of a
+  plain host subprocess. The orchestrator builds one image per board from
+  `_orchestrator/docker/Dockerfile` (tag `ai-kanban-workspace:<board>`), bind-mounts the
+  workspace root at `/workspace` (so the agent sees both its repo and the `.kanban`
+  tree), translates host paths in the prompt onto that mount, and supplies the board's
+  editable `envVars` map via `--env-file`. Credentials are NOT stored in `_meta.json`:
+  `ANTHROPIC_API_KEY` (and friends) are forwarded from the orchestrator's own environment
+  with `docker run -e`. Requires Docker on the host. Container reap/kill is by name
+  (`marker.containerName` → `docker kill`). Off by default; existing boards are unaffected.
 - **Activity feed** is `.kanban/_orchestrator/activity.json`; per-run sub-agent logs are under
   `_orchestrator/runs/`. Both `config/` and `_orchestrator/` are excluded from board scans.
 - **In-flight marker** on a ticket: an `orchestrator` block (`state`, `profile`, `model`,

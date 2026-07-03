@@ -1,0 +1,16 @@
+{
+  "name": "default",
+  "displayName": "Default",
+  "whenToUse": "Fallback for any ticket that does not clearly match another profile. Use this when first setting up the board.",
+  "model": "claude-sonnet-5",
+  "allowedTools": [
+    "Read",
+    "Edit",
+    "Write",
+    "Bash",
+    "Grep",
+    "Glob"
+  ],
+  "systemPrompt": "You are working a single kanban ticket. Keep changes minimal and focused on the ticket detail.",
+  "enabled": true
+}

@@ -1,11 +1,11 @@
 ---
 name: create-promotion-prs
-description: Use when you need to raise Salesforce promotion PRs (promo/<source>-to-<target>) for the barnumHardis repo from the CLI — dispatches the manual-create-promotion-prs.yml GitHub Actions workflow via `gh workflow run` instead of opening a throwaway PR into `partial`.
+description: Use when you need to raise Salesforce promotion PRs (promo/<source>-to-<target>) for the acme-sfdx repo from the CLI — dispatches the manual-create-promotion-prs.yml GitHub Actions workflow via `gh workflow run` instead of opening a throwaway PR into `partial`.
 ---
 
 # Creating promotion PRs from the CLI
 
-The `barnumHardis` repo promotes branches into `production`/`full`/etc. by creating
+The `acme-sfdx` repo promotes branches into `production`/`full`/etc. by creating
 `promo/<source>-to-<target>` branches and PRs. Normally that's triggered automatically
 by `create-promotion-branch.yml` when a PR is opened against `partial`. The
 **`manual-create-promotion-prs.yml`** workflow lets you skip the throwaway PR and kick
@@ -13,18 +13,18 @@ the same process off directly from the Actions tab — or, as documented here, f
 
 ## Prerequisites
 
-- `gh` (GitHub CLI) authenticated against `github.com` with access to `barnumfg/barnumHardis`
+- `gh` (GitHub CLI) authenticated against `github.com` with access to `acme/acme-sfdx`
   (`gh auth status` to check).
 - The source branch you want to promote must already be pushed to the remote.
 
 ## Key fact: where you run it from
 
 Kanban workers run with `cwd` = the workspace root (`…/GitHub/`), **not** inside the
-`barnumHardis2` checkout. So you must point `gh` at the repo explicitly with `-R`:
+`acme-sfdx2` checkout. So you must point `gh` at the repo explicitly with `-R`:
 
 ```bash
 gh workflow run manual-create-promotion-prs.yml \
-  -R barnumfg/barnumHardis \
+  -R acme/acme-sfdx \
   -f source_branch=<your-branch> \
   -f target_branches="production full" \
   -f description_of_changes="<what changed>" \
@@ -32,7 +32,7 @@ gh workflow run manual-create-promotion-prs.yml \
   -f test_coverage="<e.g. 85% or NA>"
 ```
 
-Alternatively `cd barnumHardis2` first and drop the `-R` flag — but `-R` is more robust
+Alternatively `cd acme-sfdx2` first and drop the `-R` flag — but `-R` is more robust
 because it doesn't depend on the worktree layout.
 
 ## Workflow inputs
@@ -60,7 +60,7 @@ command above works. If you've changed the workflow on a feature branch and want
 that version, dispatch against it explicitly:
 
 ```bash
-gh workflow run manual-create-promotion-prs.yml -R barnumfg/barnumHardis --ref <branch> -f …
+gh workflow run manual-create-promotion-prs.yml -R acme/acme-sfdx --ref <branch> -f …
 ```
 
 (`--ref` must point at a ref where the workflow file exists, or the dispatch 404s.)
@@ -70,8 +70,8 @@ gh workflow run manual-create-promotion-prs.yml -R barnumfg/barnumHardis --ref <
 `gh workflow run` returns immediately and prints no run id. To find and watch the run:
 
 ```bash
-gh run list -R barnumfg/barnumHardis --workflow manual-create-promotion-prs.yml -L 5
-gh run watch -R barnumfg/barnumHardis <run-id>
+gh run list -R acme/acme-sfdx --workflow manual-create-promotion-prs.yml -L 5
+gh run watch -R acme/acme-sfdx <run-id>
 ```
 
 The workflow runs on `self-hosted` runners, simulates the deploy, and posts `check-deploy`
@@ -83,6 +83,6 @@ up as a failed `check-deploy` on that target's PR rather than a failed dispatch.
 - **404 on dispatch** → the workflow file doesn't exist on the ref you targeted. Default ref
   is `production`; use `--ref <branch>` to target a branch that has it.
 - **"could not determine a repository"** → you're in the workspace root, not a repo. Add
-  `-R barnumfg/barnumHardis`.
+  `-R acme/acme-sfdx`.
 - **Source branch not found** → push it to the remote first; the workflow checks out the
   remote, not your local working tree.

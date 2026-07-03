@@ -549,17 +549,15 @@ def test_summarize_progress_empty_log_still_records_ticket_context(kanban, monke
     )
     assert out and "refactor of Q" in out
 
-    # Model unavailable → fallback must explain the empty log, not say '(no log output)'.
+    # Model unavailable → fallback must be a non-empty string directing to the run log.
     def boom(cmd, label, **kwargs):
         raise orch.subprocess.SubprocessError("model down")
 
     monkeypatch.setattr(orch, "_run_tracked", boom)
     fb = orch._summarize_progress(kanban, t2, "stalled")
-    assert fb and "(no log output)" not in fb, (
-        f"empty-log fallback must name the situation, not emit '(no log output)': {fb!r}"
-    )
-    assert "no log output" in fb.lower() or "no output" in fb.lower(), (
-        f"fallback should state the agent produced no log output, got: {fb!r}"
+    assert fb, f"empty-log fallback must be non-empty, got: {fb!r}"
+    assert "run log" in fb.lower() or "log" in fb.lower(), (
+        f"fallback should direct to the run log for details, got: {fb!r}"
     )
 
 
@@ -1455,6 +1453,116 @@ def test_real_sonnet_triage_calls_sonnet_with_ticket_context(kanban, monkeypatch
     assert result == {"dependsOn": [], "model": "claude-sonnet-4-6"}
 
 
+def test_sonnet_triage_includes_fable_in_model_choices(kanban, monkeypatch):
+    """_real_sonnet_triage must include claude-fable-5 in the list of model choices
+    passed to the LLM so it can select fable for suitable tickets."""
+    captured = {}
+
+    class FakeOut:
+        stdout = '{"dependsOn": [], "model": "claude-fable-5"}'
+
+    def fake_run_tracked(cmd, label, **kwargs):
+        captured["cmd"] = cmd
+        return FakeOut()
+
+    monkeypatch.setattr(orch, "_run_tracked", fake_run_tracked)
+
+    task = {"id": "1", "title": "Complex creative task", "detail": "Needs Fable",
+            "_board": "demo", "_path": os.path.join(kanban, "demo", "1.json")}
+    result = orch._real_sonnet_triage(kanban, task, [task])
+
+    prompt_arg = captured["cmd"][2]
+    assert "fable" in prompt_arg.lower(), (
+        "fable must appear in the triage prompt model choices"
+    )
+    assert result == {"dependsOn": [], "model": "claude-fable-5"}
+
+
+def test_probe_fable_available_returns_true_on_success(monkeypatch):
+    """_probe_fable_available returns True when the CLI exits 0."""
+    class FakeResult:
+        returncode = 0
+
+    monkeypatch.setattr(orch, "_run_tracked",
+                        lambda cmd, label, **kw: FakeResult())
+    assert orch._probe_fable_available() is True
+
+
+def test_probe_fable_available_returns_false_on_failure(monkeypatch):
+    """_probe_fable_available returns False when the CLI exits non-zero."""
+    import subprocess
+
+    def fake_run(cmd, label, **kw):
+        raise subprocess.SubprocessError("model not found")
+
+    monkeypatch.setattr(orch, "_run_tracked", fake_run)
+    assert orch._probe_fable_available() is False
+
+
+def test_spawn_agent_uses_fable_when_available(kanban, monkeypatch):
+    """When fable is available and the requested model is claude-fable-5,
+    spawn_agent passes claude-fable-5 to the claude CLI --model flag."""
+    monkeypatch.setattr(orch, "_probe_fable_available", lambda: True)
+    launched = {}
+
+    class FakeProc:
+        pid = 9901
+        _log_f = None
+        def poll(self): return None
+
+    def fake_popen(cmd, **kw):
+        launched["cmd"] = cmd
+        p = FakeProc()
+        if kw.get("stdout"):
+            kw["stdout"].write("")
+        return p
+
+    monkeypatch.setattr(orch.subprocess, "Popen", fake_popen)
+    oc.write_profile(kanban, {"name": "backend", "whenToUse": "x"})
+    task = {"id": "1", "title": "T", "_board": "demo",
+            "_path": os.path.join(kanban, "demo", "1.json")}
+    profile = {"name": "backend", "systemPrompt": "x"}
+    orch.spawn_agent(kanban, "demo", task, profile, "claude-fable-5")
+
+    cmd = launched["cmd"]
+    assert "--model" in cmd
+    idx = cmd.index("--model")
+    assert cmd[idx + 1] == "claude-fable-5"
+
+
+def test_spawn_agent_falls_back_to_opus_when_fable_unavailable(kanban, monkeypatch):
+    """When fable is NOT available and the requested model is claude-fable-5,
+    spawn_agent substitutes the fallback (opus) in the --model flag."""
+    monkeypatch.setattr(orch, "_probe_fable_available", lambda: False)
+    launched = {}
+
+    class FakeProc:
+        pid = 9902
+        _log_f = None
+        def poll(self): return None
+
+    def fake_popen(cmd, **kw):
+        launched["cmd"] = cmd
+        p = FakeProc()
+        if kw.get("stdout"):
+            kw["stdout"].write("")
+        return p
+
+    monkeypatch.setattr(orch.subprocess, "Popen", fake_popen)
+    oc.write_profile(kanban, {"name": "backend", "whenToUse": "x"})
+    task = {"id": "1", "title": "T", "_board": "demo",
+            "_path": os.path.join(kanban, "demo", "1.json")}
+    profile = {"name": "backend", "systemPrompt": "x"}
+    orch.spawn_agent(kanban, "demo", task, profile, "claude-fable-5")
+
+    cmd = launched["cmd"]
+    assert "--model" in cmd
+    idx = cmd.index("--model")
+    assert cmd[idx + 1] == oc.FABLE_FALLBACK_MODEL, (
+        f"expected opus fallback, got {cmd[idx + 1]!r}"
+    )
+
+
 # --- Ticket #58: save log turns to ticket on completion ---
 
 def test_completed_ticket_has_completed_log(kanban, monkeypatch):
@@ -1613,3 +1721,63 @@ def test_task_log_uses_completed_log_when_done(monkeypatch, tmp_path):
     assert len(turns) == 2, f"expected 2 turns from completedLog, got {turns}"
     assert turns[0]["text"] == "I did the thing."
     assert turns[1]["text"] == "All done!"
+
+
+# --- Ticket #81: stop putting raw log tail on the ticket ---
+
+def test_crash_comment_has_no_log_tail(kanban, monkeypatch):
+    """When a dispatched agent crashes, the 'NEEDS HUMAN' comment must NOT include
+    the raw log tail. Since logs are visible in the UI, appending raw log content
+    to the ticket is redundant noise.
+
+    RED against current code: the crash path appends `tail` to the comment."""
+    pid = 8101
+    p = _set_dispatched(kanban, "1", pid)
+    _write_log(kanban, "1", "agent ran step A\nagent ran step B\nERROR: something went wrong\n")
+    oc.write_state(kanban, {"enabled": False, "concurrencyCap": 3,
+                            "stopAllRequested": False})
+
+    monkeypatch.setattr(orch, "_process_alive", lambda _pid: False)
+    monkeypatch.setattr(orch, "_exit_code", lambda _pid: 1)
+    monkeypatch.setitem(orch._PROCS, pid, object())
+
+    orch.tick(kanban, opus_triage=lambda *a, **k: {"dispatch": []})
+
+    t1 = _read(p)
+    assert t1["status"] == "blocked"
+    msgs = " ".join(c["message"] for c in t1.get("comments", []))
+    assert "NEEDS HUMAN" in msgs, "crash comment must still say NEEDS HUMAN"
+    assert "agent ran step A" not in msgs, (
+        "raw log tail must NOT be appended to the ticket comment — check the logs instead"
+    )
+    assert "ERROR: something went wrong" not in msgs, (
+        "raw log tail must NOT be appended to the ticket comment"
+    )
+
+
+def test_summarize_progress_fallback_has_no_log_tail(kanban, monkeypatch):
+    """When the summarizer model is unavailable, _summarize_progress's fallback
+    must NOT include the raw log tail. Since logs are visible in the UI, embedding
+    the tail in the comment is redundant.
+
+    RED against current code: the fallback returns 'Last log tail before kill:\\n' + tail."""
+    pid = 8102
+    p = _set_dispatched(kanban, "1", pid)
+    _write_log(kanban, "1", "line A\nline B\nstep X done\n")
+
+    def boom(cmd, label, **kwargs):
+        raise orch.subprocess.SubprocessError("model down")
+
+    monkeypatch.setattr(orch, "_run_tracked", boom)
+
+    t = _read(p)
+    t["_path"] = p
+    fallback = orch._summarize_progress(kanban, t, "kill")
+
+    assert fallback, "fallback must still return a non-empty string"
+    assert "line A" not in fallback, (
+        "raw log tail must NOT be in the fallback — check the logs instead"
+    )
+    assert "step X done" not in fallback, (
+        "raw log tail must NOT be in the fallback"
+    )

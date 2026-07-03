@@ -300,6 +300,32 @@ def test_validate_triage_handles_garbage():
     assert oc.validate_triage({"dispatch": "nope"}, {"frontend"}, {"1"}) == []
 
 
+# --- Ticket #84: Fable model + opus fallback ---
+
+def test_resolve_model_returns_fable_when_fable_available():
+    """When fable is available, resolve_model returns claude-fable-5 unchanged."""
+    assert oc.resolve_model("claude-fable-5", fable_available=True) == "claude-fable-5"
+
+
+def test_resolve_model_falls_back_to_opus_when_fable_unavailable():
+    """When fable is NOT available, resolve_model returns the fallback (opus)."""
+    result = oc.resolve_model("claude-fable-5", fable_available=False)
+    assert result == oc.FABLE_FALLBACK_MODEL
+
+
+def test_resolve_model_passes_through_non_fable_models():
+    """Non-fable models are returned unchanged regardless of fable availability."""
+    assert oc.resolve_model("claude-opus-4-8", fable_available=False) == "claude-opus-4-8"
+    assert oc.resolve_model("claude-sonnet-4-6", fable_available=True) == "claude-sonnet-4-6"
+    assert oc.resolve_model(None, fable_available=False) is None
+
+
+def test_resolve_model_fable_constant_is_fable_5():
+    """The FABLE_MODEL constant names fable-5 and FABLE_FALLBACK_MODEL is opus."""
+    assert oc.FABLE_MODEL == "claude-fable-5"
+    assert "opus" in oc.FABLE_FALLBACK_MODEL
+
+
 # --- FIX 1 regression: completed + answered question must NOT be eligible ---
 
 def test_eligible_completed_with_answered_question_not_eligible():

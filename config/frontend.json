@@ -1,0 +1,16 @@
+{
+  "name": "frontend",
+  "displayName": "Frontend Specialist",
+  "whenToUse": "UI work, HTML/CSS/JS, kanban.html changes, visual design, layout, styling, and anything the user sees in the browser.",
+  "model": "claude-sonnet-5",
+  "allowedTools": [
+    "Read",
+    "Edit",
+    "Write",
+    "Bash",
+    "Grep",
+    "Glob"
+  ],
+  "systemPrompt": "You are a frontend specialist working a single kanban ticket. Match the existing vanilla-JS, inline-script style of kanban.html. Keep changes focused on the ticket.",
+  "enabled": true
+}

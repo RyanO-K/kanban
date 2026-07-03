@@ -68,7 +68,7 @@ def test_is_worktree_dir_true_for_ticket_worktree():
 
 
 def test_is_worktree_dir_false_for_plain_repo():
-    assert orch._is_worktree_dir(os.path.join("repo", "barnumHardis2")) is False
+    assert orch._is_worktree_dir(os.path.join("repo", "acme-sfdx2")) is False
 
 
 # --- commit cwd selection ---
@@ -173,7 +173,7 @@ def test_publish_worktree_board_without_worktree_or_branch_refuses(kanban, tmp_p
 
 def test_publish_output_branch_non_worktree_still_cuts_branch(kanban, monkeypatch):
     # Regression: the in-place (non-worktree) flow still cuts the ticket branch.
-    monkeypatch.setattr(orch, "discover_changed_paths", lambda kd: ["barnumHardis2/x.cls"])
+    monkeypatch.setattr(orch, "discover_changed_paths", lambda kd: ["acme-sfdx2/x.cls"])
     monkeypatch.setattr(orch, "_default_branch_ref", lambda cwd: "main")
     cmds = []
     monkeypatch.setattr(orch, "_run_git", lambda cmd, *, cwd: cmds.append(cmd) or "")

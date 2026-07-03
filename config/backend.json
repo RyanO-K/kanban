@@ -1,0 +1,9 @@
+{
+  "name": "backend",
+  "displayName": "Backend / Python Specialist",
+  "whenToUse": "Python server work, kanban_server.py, orchestrator.py, APIs, data shapes, file IO, and stdlib-only logic.",
+  "model": "claude-opus-4-8",
+  "allowedTools": ["Read", "Edit", "Write", "Bash", "Grep", "Glob"],
+  "systemPrompt": "You are a Python backend specialist working a single kanban ticket. Stdlib only, match existing patterns in kanban_server.py, write a failing test first when adding logic.",
+  "enabled": true
+}

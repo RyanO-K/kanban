@@ -88,8 +88,8 @@ def test_commit_cwd_recovers_repo_by_branch_when_tree_clean(kanban, monkeypatch)
     """Clean tree → discovery empty → repo_dir_for_paths returns the non-repo root.
     commit_cwd_for_task must recover the repo that holds the ticket's branch."""
     root = os.path.dirname(os.path.abspath(kanban))
-    src = os.path.join(root, "barnumHardis2")
-    other = os.path.join(root, "B2-SF")
+    src = os.path.join(root, "acme-sfdx2")
+    other = os.path.join(root, "other-sfdx")
     _mark_repo(src)
     _mark_repo(other)
     # Agent already committed → nothing uncommitted to discover.
@@ -111,7 +111,7 @@ def test_publish_pushes_existing_committed_branch_as_is(kanban, monkeypatch):
     push THAT branch — never `checkout -B` a fresh one from the default base, which
     would discard the agent's commits."""
     root = os.path.dirname(os.path.abspath(kanban))
-    src = os.path.join(root, "barnumHardis2")
+    src = os.path.join(root, "acme-sfdx2")
     _mark_repo(src)
     monkeypatch.setattr(orch, "discover_changed_paths", lambda kd: [])
     monkeypatch.setattr(orch, "_default_branch_ref", lambda cwd: "main")
@@ -202,7 +202,7 @@ def test_publish_existing_branch_does_not_run_checkout(kanban, monkeypatch):
     RED against current code: the existing-branch path runs
     `_run_git(["checkout", existing], ...)`."""
     root = os.path.dirname(os.path.abspath(kanban))
-    src = os.path.join(root, "barnumHardis2")
+    src = os.path.join(root, "acme-sfdx2")
     _mark_repo(src)
     monkeypatch.setattr(orch, "discover_changed_paths", lambda kd: [])
 
