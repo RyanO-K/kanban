@@ -30,6 +30,29 @@ RUN apt-get update \
 # builds reproducible; leaving it unpinned tracks latest.
 RUN npm install -g @anthropic-ai/claude-code
 
+# --- Git inside the container (ticket #8) ------------------------------------
+# The workspace is bind-mounted from the host, so every repo under it is owned by
+# the host user, not the container user. Git refuses to operate on a repo it sees
+# as owned by someone else ("detected dubious ownership"), which breaks
+# in-container `git commit` and `git worktree add`. Trusting every path clears
+# that guard. This only relaxes git's ownership check; it does not weaken host
+# security — the container is ephemeral (`--rm`) and already runs on the host
+# user's own volume.
+RUN git config --global --add safe.directory '*'
+
+# A fallback commit identity, so `git commit` never aborts for lack of a
+# user.name / user.email inside the fresh container. PUSH STAYS HOST-SIDE: the
+# orchestrator auto-commits/pushes after reap using host credentials
+# (autoCommit/autoPush) — the container only makes commits on the shared volume,
+# so this identity is just the label on those local commits.
+#
+# A board that prefers a real author may forward git identity via `passthroughEnv`
+# (ticket #7): list GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL / GIT_COMMITTER_NAME /
+# GIT_COMMITTER_EMAIL and the orchestrator passes them in by name. Those env vars
+# take precedence over this baked-in config at commit time.
+RUN git config --global user.name "AI Kanban Agent" \
+    && git config --global user.email "agent@ai-kanban.local"
+
 WORKDIR /workspace
 
 # `spawn_agent` supplies the full command (`claude -p <prompt> …`); no ENTRYPOINT

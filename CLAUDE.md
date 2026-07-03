@@ -247,6 +247,15 @@ triage prompt (`orchestrator_triage_prompt.md`).
   `passthroughEnv`, de-duplicated. Requires Docker on the host. Container reap/kill is
   by name (`marker.containerName` → `docker kill`). Off by default; existing boards are
   unaffected.
+  **Git in the container (ticket #8):** the `/workspace` mount is host-owned, so git
+  inside the container would trip its dubious-ownership guard and has no identity of its
+  own. The Dockerfile template (copied per board) runs
+  `git config --global --add safe.directory '*'` and sets a fallback
+  `user.name`/`user.email`, so in-container `git commit` and `git worktree add` succeed on
+  the shared volume. **Push stays host-side:** the container only makes local commits; the
+  orchestrator auto-commits/pushes after reap using host credentials (`autoCommit`/`autoPush`
+  in `state.json`). A board may forward a real author via `passthroughEnv`
+  (`GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL`/`GIT_COMMITTER_*`), which overrides the fallback.
 - **Activity feed** is `.kanban/_orchestrator/activity.json`; per-run sub-agent logs are under
   `_orchestrator/runs/`. Both `config/` and `_orchestrator/` are excluded from board scans.
 - **In-flight marker** on a ticket: an `orchestrator` block (`state`, `profile`, `model`,

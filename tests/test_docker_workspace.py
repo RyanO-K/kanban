@@ -561,3 +561,37 @@ def test_dispatch_one_non_docker_spawns(kanban, monkeypatch):
     assert orch._dispatch_one(kanban, task,
                               {"name": "g", "systemPrompt": "p"}, "m") is True
     assert task["status"] == "in_progress"
+
+
+# --- git works inside the container (ticket #8) ------------------------------
+#
+# A bind-mounted repo is owned by the host user, so git inside the container trips
+# its dubious-ownership guard ("detected dubious ownership"); the fresh container
+# also carries no commit identity. Both break in-container `git commit` / worktree
+# creation on the shared volume. The Dockerfile template must clear both. Push
+# stays host-side (the orchestrator auto-commits/pushes after reap), so the
+# container only needs to make local commits.
+
+def _dockerfile_template_text():
+    # orchestrator_core.py lives at the repo root; the template sits beside it
+    # under _orchestrator/docker/Dockerfile.
+    root = os.path.dirname(os.path.abspath(oc.__file__))
+    path = os.path.join(root, "_orchestrator", "docker", "Dockerfile")
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
+def test_dockerfile_template_trusts_bind_mounted_repos():
+    # Without `safe.directory '*'`, git refuses to operate on the host-owned,
+    # bind-mounted repo and in-container commits fail with 'dubious ownership'.
+    text = _dockerfile_template_text()
+    assert "safe.directory" in text
+    assert "'*'" in text or '"*"' in text
+
+
+def test_dockerfile_template_sets_fallback_git_identity():
+    # A fallback user.name / user.email so `git commit` never aborts for lack of
+    # an identity in the fresh container (boards may override via passthroughEnv).
+    text = _dockerfile_template_text()
+    assert "user.name" in text
+    assert "user.email" in text
