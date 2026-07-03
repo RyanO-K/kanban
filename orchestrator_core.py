@@ -871,6 +871,21 @@ def _has_answered_question(task):
     return bool(q) and q.get("answer") is not None
 
 
+def resume_session_id(task):
+    """The prior Claude session to RESUME when re-dispatching this ticket, or None.
+
+    Ticket #13: a blocked ticket that is being unblocked (its question has been
+    answered) should continue its EXISTING context via `claude --resume <id>`
+    rather than restart with a fresh session that has forgotten everything it
+    learned before it blocked. That only applies when the ticket already recorded
+    a `claudeSessionId` from an earlier run — a first-ever dispatch (no prior
+    session) has nothing to resume and must start fresh.
+    """
+    if not _has_answered_question(task):
+        return None
+    return task.get("claudeSessionId") or None
+
+
 # Statuses that count as "finished". The board/server treats `done` and
 # `completed` as the same column, so eligibility and dependency-satisfaction
 # must accept either spelling.

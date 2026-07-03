@@ -208,6 +208,40 @@ def test_eligible_answered_question_redispatch():
     assert [t["id"] for t in oc.eligible_tickets(tasks)] == ["1"]
 
 
+# --- Ticket #13: resume the SAME session when unblocking, not a fresh context ---
+
+def test_resume_session_id_for_unblocked_ticket_with_prior_session():
+    """A blocked ticket that has been unblocked (its question answered) and
+    already ran once (records a claudeSessionId) must resume THAT session so it
+    keeps its context, rather than starting fresh."""
+    task = {"id": "1", "status": "blocked", "claudeSessionId": "sess-abc",
+            "orchestrator": {"state": "blocked",
+                             "question": {"id": "q1",
+                                          "answer": {"value": "go", "notes": ""}}}}
+    assert oc.resume_session_id(task) == "sess-abc"
+
+
+def test_no_resume_without_prior_session():
+    """A first-ever dispatch has no prior claudeSessionId, so there is nothing to
+    resume — it must start a fresh session."""
+    task = {"id": "1", "status": "blocked",
+            "orchestrator": {"state": "blocked",
+                             "question": {"id": "q1",
+                                          "answer": {"value": "go", "notes": ""}}}}
+    assert oc.resume_session_id(task) is None
+
+
+def test_no_resume_when_not_unblocked():
+    """A ticket carrying a prior session but no answered question is fresh `ready`
+    work (or an unanswered block), not an unblock — it must not resume."""
+    ready = {"id": "1", "status": "ready", "claudeSessionId": "sess-abc"}
+    assert oc.resume_session_id(ready) is None
+    unanswered = {"id": "2", "status": "blocked", "claudeSessionId": "sess-def",
+                  "orchestrator": {"state": "blocked",
+                                   "question": {"id": "q1", "answer": None}}}
+    assert oc.resume_session_id(unanswered) is None
+
+
 # --- Ticket 23: TODO -> Ready promotion + dispatch from ready ---
 
 def test_promotable_todo_with_no_deps():

@@ -624,6 +624,98 @@ def test_tick_dispatch_records_claude_session_id(kanban, monkeypatch):
     )
 
 
+# --- Ticket #13: resume the SAME session when unblocking (don't restart fresh) ---
+
+def test_spawn_agent_resumes_prior_session_on_unblock(kanban, monkeypatch):
+    """Re-dispatching an unblocked ticket that already ran once must RESUME its
+    existing session via `--resume <sid>` — not mint a fresh `--session-id` — so
+    the agent keeps the context it had before it blocked. The resume prompt must
+    also carry the reason it was unblocked (the human's answer).
+
+    RED against current code: spawn_agent always mints a new uuid and passes
+    --session-id, throwing away the prior context on every unblock."""
+    captured = {}
+
+    class FakeProc:
+        pid = 9191
+
+        def poll(self):
+            return None
+
+    def fake_popen(cmd, stdout=None, stderr=None, cwd=None, **kw):
+        captured["cmd"] = cmd
+        return FakeProc()
+
+    monkeypatch.setattr(orch.subprocess, "Popen", fake_popen)
+
+    task = {"id": "1", "title": "x", "detail": "the detail", "_board": "demo",
+            "_path": os.path.join(kanban, "demo", "1.json"),
+            "status": "blocked", "claudeSessionId": "prior-sess",
+            "orchestrator": {"state": "blocked",
+                             "question": {"id": "q1", "prompt": "which option?",
+                                          "answer": {"value": "option A",
+                                                     "notes": "go ahead"}}}}
+    profile = {"name": "general", "systemPrompt": "p", "model": "m"}
+
+    marker = orch.spawn_agent(kanban, "demo", task, profile, "m")
+
+    cmd = captured["cmd"]
+    assert "--resume" in cmd, f"unblock must resume the prior session, got {cmd}"
+    assert cmd[cmd.index("--resume") + 1] == "prior-sess"
+    assert "--session-id" not in cmd, "resume must not also mint a new session id"
+    # The marker keeps the resumed id so the ticket keeps pointing at one session.
+    assert marker.get("sessionId") == "prior-sess"
+    # The resume prompt must convey the unblock reason (the human answer).
+    prompt = cmd[cmd.index("-p") + 1]
+    assert "option A" in prompt and "go ahead" in prompt, (
+        f"resume prompt must carry the human answer, got: {prompt}"
+    )
+
+
+def test_spawn_agent_fresh_dispatch_still_mints_session(kanban, monkeypatch):
+    """A ticket with no prior session (first dispatch) must still start fresh with
+    a minted --session-id — the resume path must not swallow the normal path."""
+    captured = {}
+
+    class FakeProc:
+        pid = 9292
+
+        def poll(self):
+            return None
+
+    def fake_popen(cmd, stdout=None, stderr=None, cwd=None, **kw):
+        captured["cmd"] = cmd
+        return FakeProc()
+
+    monkeypatch.setattr(orch.subprocess, "Popen", fake_popen)
+
+    task = {"id": "1", "title": "x", "detail": "", "_board": "demo",
+            "_path": os.path.join(kanban, "demo", "1.json")}
+    profile = {"name": "general", "systemPrompt": "p", "model": "m"}
+
+    marker = orch.spawn_agent(kanban, "demo", task, profile, "m")
+    cmd = captured["cmd"]
+    assert "--session-id" in cmd and "--resume" not in cmd
+    assert cmd[cmd.index("--session-id") + 1] == marker["sessionId"]
+
+
+def test_build_resume_prompt_carries_reason_not_full_ticket(kanban):
+    """The resume prompt is handed to a session that ALREADY holds the ticket
+    context, so it should lead with the unblock reason (the human answer), not
+    re-dump the full fresh-dispatch prompt."""
+    task = {"id": "7", "title": "Do a thing", "detail": "the detail",
+            "_path": ".kanban/demo/7.json",
+            "orchestrator": {"state": "blocked",
+                             "question": {"id": "q1", "prompt": "which path?",
+                                          "answer": {"value": "path B",
+                                                     "notes": "use the new API"}}}}
+    profile = {"name": "backend", "systemPrompt": "You are a backend dev."}
+    prompt = orch._build_resume_prompt(task, profile)
+    low = prompt.lower()
+    assert "unblock" in low or "resum" in low
+    assert "path B" in prompt and "use the new API" in prompt
+
+
 # --- Ticket #54: resume command must include the correct working directory ---
 
 def test_spawn_agent_returns_cwd_in_marker(kanban, monkeypatch):

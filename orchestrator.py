@@ -948,7 +948,7 @@ _DOCKER_PASSTHROUGH_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
 
 
 def _docker_dispatch(kanban_dir, board, task, board_meta, prompt, session_id,
-                     model, allowed, log_f):
+                     model, allowed, log_f, resuming=False):
     """Build the `docker run` argv (and container name) for an in-container agent.
 
     Mounts the workspace root at `/workspace`, so the agent sees both its board
@@ -964,7 +964,11 @@ def _docker_dispatch(kanban_dir, board, task, board_meta, prompt, session_id,
     mount_src = _repo_root(kanban_dir)  # workspace root -> /workspace
     container_name = oc.docker_container_name(board, task)
     inner_prompt = oc.translate_host_paths(prompt, mount_src)
-    inner = ["claude", "-p", inner_prompt, "--session-id", session_id,
+    # An unblock resumes the prior in-container session (ticket #13); a fresh
+    # dispatch mints one. The two flags are mutually exclusive.
+    session_flag = (["--resume", session_id] if resuming
+                    else ["--session-id", session_id])
+    inner = ["claude", "-p", inner_prompt, *session_flag,
              "--output-format", "stream-json", "--verbose"]
     if model:
         inner += ["--model", model]
@@ -1017,18 +1021,27 @@ def spawn_agent(kanban_dir, board, task, profile, model):
     # kanban dir itself if there is no parent.
     cwd = os.path.dirname(kanban_dir) or kanban_dir
 
-    # Mint the sub-agent's session id up front and pass it to the CLI with
-    # --session-id, rather than scraping it from stdout. The orchestrator then
-    # knows the id deterministically and records it on the ticket, so a human can
-    # `claude --resume <id>` to take over a blocked/stuck ticket manually.
-    session_id = str(uuid.uuid4())
+    # Session handling has two modes (ticket #13):
+    #   - Unblock/resume: a ticket that already ran once and is now being
+    #     re-dispatched after a human answered its block should CONTINUE its
+    #     existing session (`claude --resume <id>`) so it keeps the context it had
+    #     before it blocked, rather than restarting fresh. The prompt then only
+    #     carries the reason it was unblocked (the human answer).
+    #   - Fresh dispatch: mint the sub-agent's session id up front and pass it to
+    #     the CLI with --session-id, rather than scraping it from stdout. The
+    #     orchestrator then knows the id deterministically and records it on the
+    #     ticket, so a human can `claude --resume <id>` to take over manually.
+    resume_id = oc.resume_session_id(task)
+    resuming = bool(resume_id)
+    session_id = resume_id if resuming else str(uuid.uuid4())
 
     # Fable 5 may not always be available; probe and fall back to opus if needed.
     if model == oc.FABLE_MODEL:
         model = oc.resolve_model(model, fable_available=_probe_fable_available())
 
     board_meta = oc.read_board_meta(kanban_dir, board)
-    prompt = _build_agent_prompt(task, profile, board_meta)
+    prompt = (_build_resume_prompt(task, profile, board_meta) if resuming
+              else _build_agent_prompt(task, profile, board_meta))
     allowed = profile.get("allowedTools")
 
     log_f = open(log_path, "w", encoding="utf-8")
@@ -1042,9 +1055,13 @@ def spawn_agent(kanban_dir, board, task, profile, model):
     if oc.use_docker(board_meta):
         cmd, container_name = _docker_dispatch(
             kanban_dir, board, task, board_meta, prompt, session_id, model,
-            allowed, log_f)
+            allowed, log_f, resuming=resuming)
     else:
-        cmd = [_claude_cmd(), "-p", prompt, "--session-id", session_id,
+        # --resume reattaches the prior session (context preserved); --session-id
+        # mints a fresh one. The two are mutually exclusive.
+        session_flag = (["--resume", session_id] if resuming
+                        else ["--session-id", session_id])
+        cmd = [_claude_cmd(), "-p", prompt, *session_flag,
                "--output-format", "stream-json", "--verbose"]
         if model:
             cmd += ["--model", model]
@@ -1153,6 +1170,39 @@ def _build_agent_prompt(task, profile, board_meta=None):
     parts.append(_git_workflow_guidance(task, board_meta))
     parts.append(_COMMIT_GATE_GUIDANCE)
     parts.append(_HUMAN_INPUT_GUIDANCE)
+    return "\n".join(parts)
+
+
+def _build_resume_prompt(task, profile, board_meta=None):
+    """Prompt for RESUMING a previously-blocked ticket's own session (ticket #13).
+
+    The resumed session already holds the full ticket context (detail, prior
+    exploration, the code it was mid-way through), so this prompt does NOT re-dump
+    the fresh-dispatch prompt. It just tells the agent it has been unblocked and
+    hands it the reason — the human's answer to the question it raised — so it can
+    pick up where it left off.
+    """
+    marker = oc.get_marker(task) or {}
+    q = marker.get("question") or {}
+    ans = q.get("answer") or {}
+    parts = [
+        f"You are being resumed on ticket #{task['id']} "
+        f"({task.get('title', '')}). You blocked earlier waiting on human input "
+        "and have now been UNBLOCKED — continue from where you left off using the "
+        "context you already have; do not restart from scratch."
+    ]
+    if q.get("prompt"):
+        parts.append(f"\nThe question you raised: {q.get('prompt')}")
+    parts.append(
+        f"\nHuman answer value: {ans.get('value')}\n"
+        f"Human notes (authoritative, overrides the question if it was wrong): "
+        f"{ans.get('notes')}"
+    )
+    parts.append(
+        "\nFinish the ticket. When done, append a summary comment to the ticket "
+        "JSON's `comments` (writer 'Claude') and move it to `completed`. If you are "
+        "blocked again, follow the same escalation path as before."
+    )
     return "\n".join(parts)
 
 
