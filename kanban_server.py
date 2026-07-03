@@ -22,7 +22,9 @@ import threading
 import time
 from datetime import datetime, timezone, date
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.error import URLError
 from urllib.parse import urlparse, unquote, parse_qs
+from urllib.request import Request, urlopen
 
 import orchestrator_core as _oc
 import perf_monitor
@@ -152,12 +154,83 @@ STATUS_MAP = {
 # --- Model picklist ---
 # Valid values for a ticket's top-level "model" field, set from the ticket UI
 # and honored by the orchestrator at dispatch (ticket model > triage > profile).
-# Mirrored in kanban.html (MODEL_OPTIONS). An empty string clears the override.
-MODEL_VALUES = {
-    "claude-haiku-4-5-20251001",
-    "claude-sonnet-4-6",
-    "claude-opus-4-8",
-}
+# Served to the UI at runtime via GET /api/models (see MODEL_LIST) instead of
+# being duplicated by hand in kanban.js. An empty string clears the override.
+DEFAULT_MODELS = [
+    {"value": "claude-haiku-4-5-20251001", "label": "Haiku (small)"},
+    {"value": "claude-sonnet-4-6", "label": "Sonnet (medium)"},
+    {"value": "claude-opus-4-8", "label": "Opus (large)"},
+]
+
+MODELS_API_URL = "https://api.anthropic.com/v1/models"
+MODELS_API_VERSION = "2023-06-01"
+MODELS_API_TIMEOUT = 3  # seconds; startup must never hang on a slow/dead network
+
+
+def discover_models(api_key=None, url=None, timeout=MODELS_API_TIMEOUT, opener=None):
+    """Fetch the live model catalog from the Anthropic API for the ticket model
+    picklist, so it reflects what's actually available rather than a hand-
+    maintained constant. Requires an API key (ANTHROPIC_API_KEY by default);
+    with no key, or on any network/parse failure, falls back to DEFAULT_MODELS
+    so server startup never blocks or fails on network availability. Only
+    "claude-*" ids are kept (the endpoint may list non-Claude entries),
+    sorted by id for a stable picklist order.
+    """
+    if api_key is None:
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        return list(DEFAULT_MODELS)
+
+    req = Request(url or MODELS_API_URL, headers={
+        "x-api-key": api_key,
+        "anthropic-version": MODELS_API_VERSION,
+    })
+    opener = opener or urlopen
+    try:
+        with opener(req, timeout=timeout) as resp:
+            data = json.loads(resp.read())
+    except (URLError, OSError, ValueError, TimeoutError):
+        return list(DEFAULT_MODELS)
+
+    raw = data.get("data") if isinstance(data, dict) else None
+    if not isinstance(raw, list):
+        return list(DEFAULT_MODELS)
+
+    models = []
+    for m in raw:
+        if not isinstance(m, dict):
+            continue
+        model_id = m.get("id")
+        if not isinstance(model_id, str) or not model_id.startswith("claude-"):
+            continue
+        models.append({"value": model_id, "label": m.get("display_name") or model_id})
+    if not models:
+        return list(DEFAULT_MODELS)
+
+    models.sort(key=lambda m: m["value"])
+    return models
+
+
+# Current model picklist: DEFAULT_MODELS until refresh_models() runs (server
+# startup) or a test overrides it. MODEL_VALUES is the fast-lookup companion
+# used to validate a ticket's "model" field.
+MODEL_LIST = list(DEFAULT_MODELS)
+MODEL_VALUES = {m["value"] for m in MODEL_LIST}
+
+
+def refresh_models():
+    """Re-discover the model picklist and update the module-level globals.
+    Called once at server startup (see main()) so MODEL_LIST/MODEL_VALUES
+    reflect what's available for this run without needing a restart-free
+    live-reload path."""
+    global MODEL_LIST, MODEL_VALUES
+    MODEL_LIST = discover_models()
+    MODEL_VALUES = {m["value"] for m in MODEL_LIST}
+    return MODEL_LIST
+
+
+def models_list():
+    return {"models": MODEL_LIST}, 200
 
 # Canonical status value written back to JSON for each column key
 COLUMN_STATUS = {
@@ -1360,6 +1433,8 @@ class KanbanHandler(BaseHTTPRequestHandler):
             slug = unquote(path[len("/api/board/"):])
             data, status = load_board(slug)
             self._json(data, status)
+        elif path == "/api/models":
+            self._json(*models_list())
         elif path == "/api/profiles":
             self._json(*profiles_list())
         elif path.startswith("/api/profiles/"):
@@ -1635,6 +1710,9 @@ def main():
     print(f"Serving boards from: {KANBAN_DIR}")
     if not os.environ.get("KANBAN_TOKEN"):
         print(f"Auth token (also injected into the UI): {AUTH_TOKEN}")
+    # Discover the live model picklist for this run (falls back to
+    # DEFAULT_MODELS with no ANTHROPIC_API_KEY or on a failed request).
+    refresh_models()
     # Start the orchestrator tick loop alongside the server. Idempotent and
     # lock-guarded, so running several servers only ever yields one loop.
     ensure_orchestrator_running()
