@@ -1309,6 +1309,47 @@ def test_tick_resumes_after_pause_expires(kanban, monkeypatch):
     assert "usage_resume" in kinds, f"expected a 'usage_resume' activity, got {kinds}"
 
 
+# --- Ticket #12: usage limit hit by the dispatch-triage call itself ---
+
+def test_tick_triage_usage_limit_pauses_dispatch(kanban, monkeypatch):
+    """The FIRST claude call each tick is the dispatch-triage call. If IT hits a
+    usage limit (before any ticket agent is spawned), the tick must park dispatch
+    and flip the top status to "usage limited" — not silently return and keep
+    hammering the limit every tick with the pill still showing "live"."""
+    reset = int(time.time()) + 1800
+    oc.write_profile(kanban, {"name": "frontend", "whenToUse": "ui"})
+    oc.write_state(kanban, {"enabled": True, "concurrencyCap": 3,
+                            "stopAllRequested": False})
+
+    calls = []
+    monkeypatch.setattr(orch, "spawn_agent",
+                        lambda *a, **k: calls.append(a) or {"state": "dispatched"})
+    # Triage signals it hit a usage limit instead of returning a dispatch plan.
+    orch.tick(kanban, opus_triage=lambda *a, **k: {"usageLimit": {"resetAt": reset}})
+
+    assert calls == [], "no dispatch should happen when triage itself is rate-limited"
+    assert oc.is_usage_paused(kanban, now_ts=time.time()) is True
+    assert oc.read_usage_pause(kanban).get("pausedUntil") == reset
+    kinds = [e.get("kind") for e in oc.read_activity(kanban)]
+    assert "usage_limit" in kinds, f"expected a 'usage_limit' activity, got {kinds}"
+
+
+def test_real_opus_triage_detects_usage_limit(monkeypatch):
+    """When the triage CLI exits on a usage limit (no JSON, just the limit line),
+    _real_opus_triage surfaces a {'usageLimit': ...} signal with the reset epoch
+    parsed from the output — rather than swallowing it as an empty dispatch."""
+    reset = int(time.time()) + 1800
+
+    class FakeOut:
+        stdout = f"Claude AI usage limit reached|{reset}"
+        stderr = ""
+
+    monkeypatch.setattr(orch, "_run_tracked", lambda cmd, label, **k: FakeOut())
+    out = orch._real_opus_triage("p", [], [], 1)
+    assert out.get("usageLimit") == {"resetAt": reset}
+    assert "dispatch" not in out
+
+
 # --- Ticket #42: initial triage on TODO -> Ready promotion ---
 
 def test_tick_promotion_calls_initial_triage(kanban, monkeypatch):

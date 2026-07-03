@@ -1593,6 +1593,19 @@ def tick(kanban_dir, *, opus_triage, summarize_progress=None, initial_triage=Non
         return
 
     response = opus_triage(_triage_prompt(kanban_dir), eligible, profiles, free) or {}
+    # The dispatch-triage call itself can hit a usage limit (ticket #12). When it
+    # does, park dispatch just like a rate-limited ticket agent: the pre-triage
+    # pause check above short-circuits later ticks (no more calls into the limit),
+    # and the top status flips from "live" to "usage limited" until the reset.
+    if response.get("usageLimit") is not None:
+        reset = response["usageLimit"].get("resetAt")
+        oc.set_usage_pause(kanban_dir, reset, now,
+                           reason="dispatch triage hit a usage limit")
+        until = oc.read_usage_pause(kanban_dir).get("pausedUntil")
+        oc.append_activity(kanban_dir, {"ts": oc.now_iso(), "kind": "usage_limit",
+                                        "message": "dispatch triage hit a usage limit",
+                                        "pausedUntil": until})
+        return
     # Dispatch keys by (board, id): ticket ids are unique only within a board, so a
     # same-id ticket on two boards would collide under bare-id keying. An id that is
     # unambiguous across the eligible set may still be named board-lessly (the triage
@@ -1755,9 +1768,20 @@ def _real_opus_triage(prompt, eligible, profiles, free, model=None, timeout=120)
     try:
         out = _run_tracked(["claude", "-p", full, "--model", model], label,
                            capture_output=True, text=True, timeout=timeout)
-        text = out.stdout.strip()
+        text = (out.stdout or "").strip()
         start, end = text.find("{"), text.rfind("}")
-        return json.loads(text[start:end + 1]) if start >= 0 else {"dispatch": []}
+        if start >= 0:
+            return json.loads(text[start:end + 1])
+        # No JSON came back. The dispatch-triage call is the FIRST claude call of
+        # each tick, so it is the one most likely to hit a usage limit — and when
+        # it does the CLI exits with just the limit line, no plan. Surface that as
+        # a usageLimit signal so tick() can park dispatch (ticket #12); otherwise
+        # we'd silently return an empty plan and keep hammering the limit every
+        # tick with the top status still reading "live".
+        limit = oc.parse_usage_limit(text + "\n" + (getattr(out, "stderr", "") or ""))
+        if limit is not None:
+            return {"usageLimit": limit}
+        return {"dispatch": []}
     except (subprocess.SubprocessError, json.JSONDecodeError, ValueError):
         return {"dispatch": []}
 
