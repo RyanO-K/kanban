@@ -1102,6 +1102,13 @@ def _docker_dispatch(kanban_dir, board, task, board_meta, prompt, session_id,
     hardcoded Anthropic credentials plus the board's `passthroughEnv` names
     (ticket #7). No secret value is ever written to `_meta.json`, the env-file, or
     the image — only the name travels, `docker run -e NAME` inherits the value.
+
+    Returns (cmd, container_name, inner_prompt). With CHAT_ENABLED the inner
+    claude reads `--input-format stream-json` from an attached stdin
+    (`docker run -i`) and `inner_prompt` — the host-path-translated prompt —
+    is what spawn_agent writes as the first stdin user message. With
+    CHAT_ENABLED off the legacy argv-prompt form is emitted and inner_prompt
+    is unused.
     """
     _build_docker_image(kanban_dir, board, log_f)
     env_file = _write_board_env_file(kanban_dir, board, board_meta)
@@ -1112,16 +1119,21 @@ def _docker_dispatch(kanban_dir, board, task, board_meta, prompt, session_id,
     # dispatch mints one. The two flags are mutually exclusive.
     session_flag = (["--resume", session_id] if resuming
                     else ["--session-id", session_id])
-    inner = ["claude", "-p", inner_prompt, *session_flag,
-             "--output-format", "stream-json", "--verbose"]
+    if oc.CHAT_ENABLED:
+        inner = ["claude", "-p", "--input-format", "stream-json",
+                 "--output-format", "stream-json", "--verbose", *session_flag]
+    else:
+        inner = ["claude", "-p", inner_prompt, *session_flag,
+                 "--output-format", "stream-json", "--verbose"]
     if model:
         inner += ["--model", model]
     if allowed:
         inner += ["--allowedTools", ",".join(allowed)]
     passthrough = _resolve_passthrough_env(board_meta, log_f)
     cmd = oc.docker_run_argv(oc.docker_image_tag(board), container_name, mount_src,
-                             env_file, inner, passthrough_env=passthrough)
-    return cmd, container_name
+                             env_file, inner, passthrough_env=passthrough,
+                             interactive=oc.CHAT_ENABLED)
+    return cmd, container_name, inner_prompt
 
 
 def _resolve_passthrough_env(board_meta, log_f):
@@ -1198,7 +1210,9 @@ def spawn_agent(kanban_dir, board, task, profile, model):
     container_name = None
     stdin_prompt = prompt  # what the first stream-json user message will carry
     if oc.use_docker(board_meta):
-        cmd, container_name = _docker_dispatch(
+        # Docker mode: the first stdin message must carry the host-path-
+        # TRANSLATED prompt (the agent lives on the /workspace mount).
+        cmd, container_name, stdin_prompt = _docker_dispatch(
             kanban_dir, board, task, board_meta, prompt, session_id, model,
             allowed, log_f, resuming=resuming)
     else:
@@ -1221,9 +1235,9 @@ def spawn_agent(kanban_dir, board, task, profile, model):
         if allowed:
             cmd += ["--allowedTools", ",".join(allowed)]
 
-    # Chat wiring is host-only for now; the Docker task extends it (the inner
-    # container claude does not read streaming input yet).
-    chat = oc.CHAT_ENABLED and container_name is None
+    # Agent chat applies to both dispatch modes: host subprocess and docker
+    # (`docker run -i` keeps the pipe attached through the container).
+    chat = oc.CHAT_ENABLED
 
     inbox_path = oc.chat_inbox_path(board, task["id"])
     if chat:

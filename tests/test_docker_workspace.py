@@ -137,6 +137,15 @@ def test_docker_run_argv_without_envfile():
     assert argv[-1] == "claude"
 
 
+def test_docker_run_argv_interactive_adds_stdin_flag():
+    # Agent chat needs the container's stdin attached to the docker run client.
+    argv = oc.docker_run_argv("img", "c", "/r", None, ["claude"], interactive=True)
+    assert argv[:4] == ["docker", "run", "--rm", "-i"]
+    # Default stays non-interactive (legacy shape untouched).
+    argv2 = oc.docker_run_argv("img", "c", "/r", None, ["claude"])
+    assert "-i" not in argv2
+
+
 # --- spawn_agent wiring -----------------------------------------------------
 
 def _docker_board(kanban, env=None):
@@ -158,6 +167,8 @@ def _docker_board(kanban, env=None):
 def test_spawn_agent_docker_runs_in_container(kanban, monkeypatch):
     _docker_board(kanban, env={"FOO": "bar"})
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(orch, "_start_chat_pump", lambda *a, **k: None)
+    monkeypatch.setattr(oc, "CHAT_DIR", os.path.join(kanban, "_orchestrator", "chat"))
 
     builds = []
 
@@ -172,12 +183,16 @@ def test_spawn_agent_docker_runs_in_container(kanban, monkeypatch):
     class FakeProc:
         pid = 7777
 
+        def __init__(self):
+            self.stdin = io.BytesIO()
+
         def poll(self):
             return None
 
     def fake_popen(cmd, stdout=None, stderr=None, cwd=None, **kw):
         captured["cmd"] = cmd
-        return FakeProc()
+        captured["proc"] = FakeProc()
+        return captured["proc"]
 
     monkeypatch.setattr(orch.subprocess, "Popen", fake_popen)
 
@@ -197,13 +212,16 @@ def test_spawn_agent_docker_runs_in_container(kanban, monkeypatch):
     cname = oc.docker_container_name("demo", task)
     assert marker["containerName"] == cname
     assert cname in cmd
-    # The inner claude invocation runs after the image tag, with host paths in
-    # the prompt translated onto the /workspace mount.
+    # The inner claude invocation runs after the image tag; in chat mode the
+    # prompt travels via stdin (host paths translated onto the /workspace
+    # mount) rather than argv.
     tag = oc.docker_image_tag("demo")
     inner = cmd[cmd.index(tag) + 1:]
     assert inner[0] == "claude" and inner[1] == "-p"
-    assert "/workspace" in inner[2]
-    assert kanban not in inner[2]
+    text = json.loads(captured["proc"].stdin.getvalue().decode("utf-8")
+                      .splitlines()[0])["message"]["content"][0]["text"]
+    assert "/workspace" in text
+    assert kanban not in text
 
 
 def test_spawn_agent_docker_forwards_api_key(kanban, monkeypatch):
@@ -211,10 +229,13 @@ def test_spawn_agent_docker_forwards_api_key(kanban, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     monkeypatch.setattr(orch.subprocess, "run",
                         lambda *a, **k: type("R", (), {"returncode": 0})())
+    monkeypatch.setattr(orch, "_start_chat_pump", lambda *a, **k: None)
+    monkeypatch.setattr(oc, "CHAT_DIR", os.path.join(kanban, "_orchestrator", "chat"))
     captured = {}
 
     class FakeProc:
         pid = 7778
+        stdin = io.BytesIO()
 
         def poll(self):
             return None
@@ -351,8 +372,8 @@ def test_docker_dispatch_passthrough_ordering_and_warning(kanban, monkeypatch):
         monkeypatch.delenv(absent, raising=False)
 
     log = io.StringIO()
-    cmd, _cname = orch._docker_dispatch(kanban, "demo", {"id": "1"}, meta,
-                                        "prompt", "sess", "m", None, log)
+    cmd, _cname, _inner = orch._docker_dispatch(kanban, "demo", {"id": "1"}, meta,
+                                                "prompt", "sess", "m", None, log)
     forwarded = [cmd[i + 1] for i, a in enumerate(cmd) if a == "-e"]
     # Anthropic defaults first, then the board's present secret; the duplicate
     # ANTHROPIC_API_KEY appears once; the absent MISSING_SECRET is not forwarded.
@@ -376,10 +397,13 @@ def test_spawn_agent_docker_forwards_passthrough_env(kanban, monkeypatch):
     monkeypatch.setenv("GITHUB_TOKEN", "ghp-secret")
     monkeypatch.setattr(orch.subprocess, "run",
                         lambda *a, **k: type("R", (), {"returncode": 0})())
+    monkeypatch.setattr(orch, "_start_chat_pump", lambda *a, **k: None)
+    monkeypatch.setattr(oc, "CHAT_DIR", os.path.join(kanban, "_orchestrator", "chat"))
     captured = {}
 
     class FakeProc:
         pid = 7779
+        stdin = io.BytesIO()
 
         def poll(self):
             return None
@@ -599,3 +623,104 @@ def test_dockerfile_template_sets_fallback_git_identity():
     text = _dockerfile_template_text()
     assert "user.name" in text
     assert "user.email" in text
+
+
+# --- Agent chat in docker mode (spec 2026-07-03) -----------------------------
+
+
+def test_spawn_agent_docker_chat_streams_translated_prompt(kanban, monkeypatch):
+    """Docker chat dispatch: `docker run -i`, inner claude gets
+    --input-format stream-json with NO prompt argv, and the first stdin
+    message carries the host-path-TRANSLATED prompt."""
+    _docker_board(kanban)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(orch.subprocess, "run",
+                        lambda *a, **k: type("R", (), {"returncode": 0})())
+    monkeypatch.setattr(orch, "_start_chat_pump", lambda *a, **k: None)
+    monkeypatch.setattr(oc, "CHAT_DIR", os.path.join(kanban, "_orchestrator", "chat"))
+
+    captured = {}
+
+    class FakeProc:
+        pid = 7779
+
+        def __init__(self):
+            self.stdin = io.BytesIO()
+
+        def poll(self):
+            return None
+
+    def fake_popen(cmd, **k):
+        captured["cmd"] = cmd
+        captured["stdin"] = k.get("stdin")
+        captured["proc"] = FakeProc()
+        return captured["proc"]
+
+    monkeypatch.setattr(orch.subprocess, "Popen", fake_popen)
+    task = {"id": "1", "title": "x", "detail": "", "_board": "demo",
+            "_path": os.path.join(kanban, "demo", "1.json")}
+    orch.spawn_agent(kanban, "demo", task, {"name": "g", "systemPrompt": "p"}, "m")
+
+    cmd = captured["cmd"]
+    assert cmd[:4] == ["docker", "run", "--rm", "-i"], \
+        "docker chat mode must keep stdin attached with -i"
+    # Inner claude reads streaming input; the prompt is NOT in argv.
+    tag = oc.docker_image_tag("demo")
+    inner = cmd[cmd.index(tag) + 1:]
+    assert inner[0] == "claude" and inner[1] == "-p"
+    assert inner[2:4] == ["--input-format", "stream-json"]
+    assert not any(kanban in str(a) for a in inner), \
+        "no host path (i.e. no prompt) may remain in the inner argv"
+    # The first stdin message is the TRANSLATED prompt (host paths -> /workspace).
+    assert captured["stdin"] is orch.subprocess.PIPE
+    raw = captured["proc"].stdin.getvalue().decode("utf-8")
+    text = json.loads(raw.splitlines()[0])["message"]["content"][0]["text"]
+    assert "/workspace" in text
+    assert kanban not in text
+
+
+def test_spawn_agent_docker_chat_disabled_keeps_legacy_inner_cmd(kanban, monkeypatch):
+    """CHAT_ENABLED=False: docker dispatch is byte-for-byte the legacy form —
+    prompt in the inner argv, no -i, no stdin pipe, no pump."""
+    _docker_board(kanban)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(orch.subprocess, "run",
+                        lambda *a, **k: type("R", (), {"returncode": 0})())
+    monkeypatch.setattr(oc, "CHAT_ENABLED", False)
+    pumps = []
+    monkeypatch.setattr(orch, "_start_chat_pump",
+                        lambda *a, **k: pumps.append(a))
+    monkeypatch.setattr(oc, "CHAT_DIR", os.path.join(kanban, "_orchestrator", "chat"))
+
+    captured = {}
+
+    class FakeProc:
+        pid = 7780
+
+        def __init__(self):
+            self.stdin = io.BytesIO()
+
+        def poll(self):
+            return None
+
+    def fake_popen(cmd, **k):
+        captured["cmd"] = cmd
+        captured["stdin"] = k.get("stdin")
+        captured["proc"] = FakeProc()
+        return captured["proc"]
+
+    monkeypatch.setattr(orch.subprocess, "Popen", fake_popen)
+    task = {"id": "1", "title": "x", "detail": "", "_board": "demo",
+            "_path": os.path.join(kanban, "demo", "1.json")}
+    orch.spawn_agent(kanban, "demo", task, {"name": "g", "systemPrompt": "p"}, "m")
+
+    cmd = captured["cmd"]
+    assert "-i" not in cmd
+    tag = oc.docker_image_tag("demo")
+    inner = cmd[cmd.index(tag) + 1:]
+    assert inner[0] == "claude" and inner[1] == "-p"
+    assert "/workspace" in inner[2], "legacy form keeps the translated prompt in argv"
+    assert "--input-format" not in inner
+    assert captured["stdin"] is None
+    assert captured["proc"].stdin.getvalue() == b""
+    assert pumps == []

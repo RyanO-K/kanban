@@ -536,11 +536,15 @@ def docker_build_argv(image_tag, dockerfile_path, context_dir):
 
 
 def docker_run_argv(image_tag, container_name, mount_src, env_file, inner_argv,
-                    container_workdir=CONTAINER_WORKSPACE, passthrough_env=None):
+                    container_workdir=CONTAINER_WORKSPACE, passthrough_env=None,
+                    interactive=False):
     """The `docker run` argv that runs `inner_argv` inside the workspace image.
 
     - `--rm` so the container is discarded on exit (its work is on the mounted
       volume, persisted to the host).
+    - `-i` (when `interactive`) keeps the container's stdin attached to the
+      host `docker run` client so agent chat can stream stream-json input
+      through it (spec 2026-07-03).
     - `--name` fixes the container name so reap can `docker kill` it by name.
     - `-v mount_src:/workspace` mounts the whole workspace root, giving the agent
       both its board repo and the `.AI-kanban` tree (its ticket JSON lives there).
@@ -549,9 +553,12 @@ def docker_run_argv(image_tag, container_name, mount_src, env_file, inner_argv,
       (value inherited from the orchestrator's own environment) — used for
       secrets like `ANTHROPIC_API_KEY` that shouldn't be written into _meta.json.
     """
-    argv = ["docker", "run", "--rm", "--name", container_name,
-            "-v", f"{mount_src}:{CONTAINER_WORKSPACE}",
-            "-w", container_workdir]
+    argv = ["docker", "run", "--rm"]
+    if interactive:
+        argv.append("-i")
+    argv += ["--name", container_name,
+             "-v", f"{mount_src}:{CONTAINER_WORKSPACE}",
+             "-w", container_workdir]
     if env_file:
         argv += ["--env-file", env_file]
     for name in (passthrough_env or []):
