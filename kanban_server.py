@@ -142,13 +142,14 @@ KANBAN_GUIDE = (
 
 # --- Status column mapping ---
 STATUS_MAP = {
-    "todo":        ("todo",        "Todo",        "#6b7280"),
-    "ready":        ("ready",       "Ready",       "#8b5cf6"),
-    "in_progress": ("in_progress", "In Progress", "#f59e0b"),
-    "in-progress": ("in_progress", "In Progress", "#f59e0b"),
-    "blocked":     ("blocked",     "Blocked",     "#ef4444"),
-    "completed":   ("done",        "Done",        "#22c55e"),
-    "done":        ("done",        "Done",        "#22c55e"),
+    "todo":           ("todo",           "Todo",           "#6b7280"),
+    "ready":          ("ready",          "Ready",          "#8b5cf6"),
+    "in_progress":    ("in_progress",    "In Progress",    "#f59e0b"),
+    "in-progress":    ("in_progress",    "In Progress",    "#f59e0b"),
+    "blocked":        ("blocked",        "Blocked",        "#ef4444"),
+    "awaiting_merge": ("awaiting_merge", "Awaiting Merge", "#0ea5e9"),
+    "completed":      ("done",           "Done",           "#22c55e"),
+    "done":           ("done",           "Done",           "#22c55e"),
 }
 
 # --- Model picklist ---
@@ -234,19 +235,21 @@ def models_list():
 
 # Canonical status value written back to JSON for each column key
 COLUMN_STATUS = {
-    "todo":        "todo",
-    "ready":        "ready",
-    "in_progress": "in_progress",
-    "blocked":     "blocked",
-    "done":        "completed",
+    "todo":           "todo",
+    "ready":          "ready",
+    "in_progress":    "in_progress",
+    "blocked":        "blocked",
+    "awaiting_merge": "awaiting_merge",
+    "done":           "completed",
 }
 
 COLUMNS = [
-    {"key": "todo",        "label": "Todo",        "color": "#6b7280"},
-    {"key": "ready",       "label": "Ready",       "color": "#8b5cf6"},
-    {"key": "in_progress", "label": "In Progress", "color": "#f59e0b"},
-    {"key": "blocked",     "label": "Blocked",     "color": "#ef4444"},
-    {"key": "done",        "label": "Done",        "color": "#22c55e"},
+    {"key": "todo",           "label": "Todo",           "color": "#6b7280"},
+    {"key": "ready",          "label": "Ready",          "color": "#8b5cf6"},
+    {"key": "in_progress",    "label": "In Progress",    "color": "#f59e0b"},
+    {"key": "blocked",        "label": "Blocked",        "color": "#ef4444"},
+    {"key": "awaiting_merge", "label": "Awaiting Merge", "color": "#0ea5e9"},
+    {"key": "done",           "label": "Done",           "color": "#22c55e"},
 ]
 
 
@@ -915,6 +918,40 @@ def delete_task(slug, task_id):
     return {"ok": True, "deletedId": task_id}, 200
 
 
+def list_awaiting_merge(slug):
+    """Return all tickets with status `awaiting_merge` for a board (or all boards).
+
+    Mirrors the shape of load_board: {tasks, columns, ...}. Useful for querying
+    tickets that are done but not yet merged into release/main.
+    """
+    if slug == ALL_SLUG:
+        data, status = load_all_boards()
+        if status != 200:
+            return data, status
+        data["tasks"] = [t for t in data["tasks"] if t.get("status") == "awaiting_merge"]
+        return data, 200
+
+    path, safe = board_dir(slug)
+    if path is None or not is_board(path):
+        return {"error": "board not found"}, 404
+
+    tasks = []
+    for tp in list_ticket_files(path):
+        try:
+            with open(tp, "r", encoding="utf-8") as f:
+                task = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            continue
+        if task.get("status") != "awaiting_merge":
+            continue
+        task["_column"] = "awaiting_merge"
+        task["_board"] = safe
+        task["_filePath"] = os.path.abspath(tp).replace("\\", "/")
+        tasks.append(task)
+    tasks.sort(key=task_sort_key)
+    return {"tasks": tasks, "board": safe}, 200
+
+
 def add_comment(slug, task_id, payload):
     path, _ = board_dir(slug)
     if path is None or not is_board(path):
@@ -1472,6 +1509,10 @@ class KanbanHandler(BaseHTTPRequestHandler):
                 self._json(*task_log(slug, task_id, n))
             else:
                 self.send_error(404)
+        # GET /api/board/<slug>/awaiting-merge — list tickets awaiting merge
+        elif path.startswith("/api/board/") and path.endswith("/awaiting-merge"):
+            slug = unquote(path[len("/api/board/"):-len("/awaiting-merge")])
+            self._json(*list_awaiting_merge(slug))
         elif path.startswith("/api/board/"):
             slug = unquote(path[len("/api/board/"):])
             data, status = load_board(slug)

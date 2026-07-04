@@ -23,8 +23,9 @@ A directory is only a board if it contains `_meta.json` (so `__pycache__` etc. a
 Key fields on a `<id>.json` ticket:
 
 - `id` (string), `title`, `status`, `detail`
-- `status` is one of: `todo`, `ready`, `in_progress`, `blocked`, `pending`, `completed`
-  (`ready` = all `dependsOn` met/none and queued to start, but not yet picked up)
+- `status` is one of: `todo`, `ready`, `in_progress`, `blocked`, `awaiting_merge`, `pending`, `completed`
+  (`ready` = all `dependsOn` met/none and queued to start, but not yet picked up;
+   `awaiting_merge` = work is done but the branch hasn't been merged into release/main yet)
 - `dependsOn` / `blocks`: arrays of ticket ids
 - `steps`, `files`, `outputs`: plan/checklist arrays
 - `history`: append-only audit log of `status_change` entries (with timestamps)
@@ -43,6 +44,7 @@ entry to `history` with a UTC timestamp. To add a new ticket, create `<next-id>.
 |---|---|
 | List boards | `GET /api/files` |
 | Load a board (or `__all__`) | `GET /api/board/<slug>` |
+| List awaiting-merge tickets | `GET /api/board/<slug>/awaiting-merge` (use `__all__` for all boards) |
 | Move ticket | `PATCH /api/board/<slug>/task/<id>` body `{"column":"in_progress"}` |
 | Create ticket | `POST /api/board/<slug>/task` body `{"title":...,"detail":...}` |
 | Add comment | `POST /api/board/<slug>/task/<id>/comment` body `{"writer":...,"message":...}` |
