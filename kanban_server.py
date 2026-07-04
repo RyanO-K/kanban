@@ -1236,6 +1236,49 @@ def orch_answer(board, task_id, payload):
     return {"ok": True}, 200
 
 
+def orch_chat(board, task_id, payload):
+    """Append a chat message to a RUNNING ticket's inbox (agent chat).
+
+    Spec: docs/specs/2026-07-03-agent-chat-design.md, Component 2. Stores the
+    raw {"message","writer","ts"} fields — the orchestrator pump does the
+    writer-attribution wrapping when it relays to the agent's stdin. Does NOT
+    check the PID is alive: that race belongs to the pump/reap side (a message
+    posted just as the run dies is silently dropped with the inbox file).
+    """
+    path = _ticket_file(board, task_id)
+    if path is None or not os.path.isfile(path):
+        return {"error": "not found"}, 404
+    msg = (payload or {}).get("message")
+    if not isinstance(msg, str) or not msg.strip():
+        return {"error": "message must be a non-empty string"}, 400
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            task = json.load(f)
+    except (OSError, ValueError):
+        return {"error": "could not read ticket"}, 500
+    marker = task.get("orchestrator") or {}
+    if not (marker.get("state") == "dispatched"
+            and task.get("status") == "in_progress"):
+        return {"error": "not running"}, 409
+    if not _oc.CHAT_ENABLED:
+        return {"error": "chat disabled"}, 409
+    writer = str((payload or {}).get("writer") or "unknown")
+    line = json.dumps({"message": msg, "writer": writer, "ts": _oc.now_iso()},
+                      ensure_ascii=False) + "\n"
+    inbox = _oc.chat_inbox_path(board, task_id)
+    try:
+        os.makedirs(os.path.dirname(inbox), exist_ok=True)
+        # Single write of one whole line + flush: the pump tails by byte
+        # offset and only consumes complete lines, so this append is atomic
+        # enough — nothing partial is ever relayed.
+        with open(inbox, "a", encoding="utf-8") as f:
+            f.write(line)
+            f.flush()
+    except OSError:
+        return {"error": "could not write inbox"}, 500
+    return {"ok": True}, 200
+
+
 # --- Performance monitor ----------------------------------------------------
 
 def _owned_pids():
@@ -1561,6 +1604,13 @@ class KanbanHandler(BaseHTTPRequestHandler):
             if payload is None:
                 return
             self._json(*orch_answer(unquote(parts[4]), unquote(parts[5]), payload))
+
+        # POST /api/orchestrator/chat/<board>/<id> — message a running agent
+        elif len(parts) == 6 and parts[1] == "api" and parts[2] == "orchestrator" and parts[3] == "chat":
+            payload = self._read_json()
+            if payload is None:
+                return
+            self._json(*orch_chat(unquote(parts[4]), unquote(parts[5]), payload))
 
         # POST /api/orchestrator/nudge — immediate tick
         elif len(parts) == 4 and parts[1] == "api" and parts[2] == "orchestrator" and parts[3] == "nudge":
