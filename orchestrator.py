@@ -11,6 +11,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import uuid
 
@@ -23,6 +24,13 @@ SKIP_DIRS = {"config", "_orchestrator", "__pycache__", "tests"}
 # Registry of Popen objects for processes we spawned.
 # Maps pid (int) -> Popen so we can read real exit codes on reap.
 _PROCS = {}
+
+# Registry of chat pump threads for processes we spawned (agent chat, spec
+# docs/specs/2026-07-03-agent-chat-design.md). Maps pid (int) ->
+# {"thread": Thread, "inbox": str} so reap/shutdown can join the thread and
+# delete the run's inbox file. Pumps are daemons: a crashed loop never blocks
+# orchestrator exit.
+_PUMPS = {}
 
 # Registry of short-lived server background ops (triage, summarize).
 # Maps pid (int) -> label string. Populated while subprocess.run() blocks so
@@ -212,12 +220,136 @@ def _kill_container(name):
         return False
 
 
+# --- Agent chat pump (spec docs/specs/2026-07-03-agent-chat-design.md) ------
+
+
+def _tail_new_lines(path, offset):
+    """New complete lines appended to *path* past byte *offset*.
+
+    Returns (lines, new_offset). Only lines terminated by \\n are consumed —
+    a partial trailing line stays unconsumed (offset not advanced past it) so
+    the next poll picks it up once its writer finishes. A missing/unreadable
+    file returns ([], offset) — retry next loop, never crash.
+    """
+    try:
+        with open(path, "rb") as f:
+            f.seek(offset)
+            data = f.read()
+    except OSError:
+        return [], offset
+    if not data:
+        return [], offset
+    text = data.decode("utf-8", errors="replace")
+    parts = text.split("\n")
+    remainder = "" if text.endswith("\n") else parts[-1]
+    complete = parts[:-1]
+    consumed = len(data) - len(remainder.encode("utf-8"))
+    # Strip a trailing \r so CRLF-terminated lines (Windows text-mode writers,
+    # incl. the server's own inbox append) yield clean JSON with no \r tail.
+    out = []
+    for ln in complete:
+        if ln.endswith("\r"):
+            ln = ln[:-1]
+        if ln.strip():
+            out.append(ln)
+    return out, offset + consumed
+
+
+def _chat_pump(proc, inbox_path, log_path, poll_seconds=1.0):
+    """Per-run daemon thread body: relay inbox messages to the child's stdin.
+
+    Loop (~1s):
+      1. Child died?            -> delete the inbox file, exit.
+      2. New inbox lines?       -> write each to child stdin as a stream-json
+         user message wrapped `[Message from <writer> via Discord]\\n<msg>`;
+         a broken pipe on write is treated as child death (step 1).
+      3. Result in the run log? -> arms the close decision.
+      4. chat_should_close      -> close child stdin (the CLI exits after its
+         queued input; the normal reap path then proceeds), exit the thread.
+
+    Never lets an exception kill the loop except through the exit paths.
+    """
+    inbox_off = 0
+    log_off = 0
+    result_seen_after_last_send = False
+    while True:
+        if proc.poll() is not None:
+            # Child died (finished, killed, or crashed): drop the inbox —
+            # messages posted just as the run died are silently dropped.
+            try:
+                os.remove(inbox_path)
+            except OSError:
+                pass
+            return
+        try:
+            # 2. Deliver any new inbox lines to the child's stdin.
+            lines, inbox_off = _tail_new_lines(inbox_path, inbox_off)
+            for raw in lines:
+                parsed = oc.chat_parse_inbox_line(raw)
+                if parsed is None:
+                    continue  # malformed line: skip it
+                wrapped = (f"[Message from {parsed['writer']} via Discord]\n"
+                           f"{parsed['message']}")
+                try:
+                    proc.stdin.write(
+                        oc.chat_encode_user_message(wrapped).encode("utf-8"))
+                    proc.stdin.flush()
+                except (OSError, ValueError):
+                    # Broken pipe: the child is dead/dying. Same cleanup as
+                    # step 1; the reap path handles the ticket.
+                    try:
+                        os.remove(inbox_path)
+                    except OSError:
+                        pass
+                    return
+                result_seen_after_last_send = False
+            # 3. Watch the run log for the CLI's top-level result lines.
+            log_lines, log_off = _tail_new_lines(log_path, log_off)
+            for raw in log_lines:
+                try:
+                    obj = json.loads(raw)
+                except ValueError:
+                    continue
+                if isinstance(obj, dict) and obj.get("type") == "result":
+                    result_seen_after_last_send = True
+            # 4. Close stdin once the agent is done and nothing is queued.
+            try:
+                inbox_empty = os.path.getsize(inbox_path) <= inbox_off
+            except OSError:
+                inbox_empty = True  # no inbox file = nothing queued
+            if oc.chat_should_close(result_seen_after_last_send, inbox_empty):
+                try:
+                    proc.stdin.close()
+                except OSError:
+                    pass
+                return
+        except Exception:
+            # Inbox/log transiently unreadable, etc: retry next iteration.
+            pass
+        time.sleep(poll_seconds)
+
+
+def _start_chat_pump(proc, inbox_path, log_path):
+    """Create, register (next to _PROCS), and start a run's chat pump thread.
+
+    A module-level seam so spawn_agent tests can monkeypatch it away without
+    threading real pumps around fake Popen objects.
+    """
+    th = threading.Thread(target=_chat_pump, args=(proc, inbox_path, log_path),
+                          name=f"chat-pump-{proc.pid}", daemon=True)
+    _PUMPS[proc.pid] = {"thread": th, "inbox": inbox_path}
+    th.start()
+    return th
+
+
 def _release_proc(pid):
-    """Close the log handle and remove pid from the registry.
+    """Close the log handle, drop the pid from the registries, delete the
+    run's chat inbox.
 
     Call this whenever we are done with a dispatched process (killed, reaped,
     crashed, completed, needs_human, stop-all).  Safe to call even if the pid
-    is not in the registry (no-op).
+    is not in the registries (no-op).  Closing stdin here also unblocks a
+    still-waiting CLI (belt-and-braces alongside the pump's own close).
     """
     p = _PROCS.pop(pid, None)
     if p is not None:
@@ -227,6 +359,18 @@ def _release_proc(pid):
                 log_f.close()
             except OSError:
                 pass
+        stdin = getattr(p, "stdin", None)
+        if stdin is not None:
+            try:
+                stdin.close()
+            except OSError:
+                pass
+    pump = _PUMPS.pop(pid, None)
+    if pump is not None:
+        try:
+            os.remove(pump["inbox"])
+        except OSError:
+            pass
 
 
 def _run_tracked(cmd, label, **run_kwargs):
