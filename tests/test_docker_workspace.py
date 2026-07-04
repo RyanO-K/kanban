@@ -9,6 +9,7 @@ via `--env-file`. This covers:
   3. The server exposing/sanitizing the `useDocker` + `envVars` board-meta fields.
 """
 
+import io
 import json
 import os
 
@@ -236,6 +237,7 @@ def test_spawn_agent_non_docker_has_no_container(kanban, monkeypatch):
     # Regression: default board (no useDocker) still runs a plain claude subprocess.
     class FakeProc:
         pid = 8888
+        stdin = io.BytesIO()
 
         def poll(self):
             return None
@@ -247,6 +249,8 @@ def test_spawn_agent_non_docker_has_no_container(kanban, monkeypatch):
         return FakeProc()
 
     monkeypatch.setattr(orch.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(orch, "_start_chat_pump", lambda *a, **k: None)
+    monkeypatch.setattr(oc, "CHAT_DIR", os.path.join(kanban, "_orchestrator", "chat"))
     task = {"id": "1", "title": "x", "detail": "", "_board": "demo",
             "_path": os.path.join(kanban, "demo", "1.json")}
     marker = orch.spawn_agent(kanban, "demo", task,

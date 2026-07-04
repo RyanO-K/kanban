@@ -1196,6 +1196,7 @@ def spawn_agent(kanban_dir, board, task, profile, model):
     #     board's editable env vars supplied via `--env-file`.
     #   - Default: run `claude -p` as a plain host subprocess in the workspace root.
     container_name = None
+    stdin_prompt = prompt  # what the first stream-json user message will carry
     if oc.use_docker(board_meta):
         cmd, container_name = _docker_dispatch(
             kanban_dir, board, task, board_meta, prompt, session_id, model,
@@ -1205,22 +1206,52 @@ def spawn_agent(kanban_dir, board, task, profile, model):
         # mints a fresh one. The two are mutually exclusive.
         session_flag = (["--resume", session_id] if resuming
                         else ["--session-id", session_id])
-        cmd = [_claude_cmd(), "-p", prompt, *session_flag,
-               "--output-format", "stream-json", "--verbose"]
+        if oc.CHAT_ENABLED:
+            # Agent chat (spec 2026-07-03): the prompt is NOT argv — it is
+            # written to stdin as the first stream-json user message, and
+            # later chat messages follow on the same pipe.
+            cmd = [_claude_cmd(), "-p", "--input-format", "stream-json",
+                   "--output-format", "stream-json", "--verbose", *session_flag]
+        else:
+            # Legacy escape hatch: byte-for-byte the pre-chat dispatch form.
+            cmd = [_claude_cmd(), "-p", prompt, *session_flag,
+                   "--output-format", "stream-json", "--verbose"]
         if model:
             cmd += ["--model", model]
         if allowed:
             cmd += ["--allowedTools", ",".join(allowed)]
 
+    # Chat wiring is host-only for now; the Docker task extends it (the inner
+    # container claude does not read streaming input yet).
+    chat = oc.CHAT_ENABLED and container_name is None
+
+    inbox_path = oc.chat_inbox_path(board, task["id"])
+    if chat:
+        # Stale messages from a previous run must never leak into this run.
+        try:
+            os.remove(inbox_path)
+        except OSError:
+            pass
+
     # On POSIX, put the agent in its own session/process group so kill_pid can
     # take down the whole child tree via os.killpg (Windows uses taskkill /T).
     popen_kw = {} if sys.platform == "win32" else {"start_new_session": True}
+    if chat:
+        popen_kw["stdin"] = subprocess.PIPE
     proc = subprocess.Popen(cmd, stdout=log_f, stderr=subprocess.STDOUT, cwd=cwd,
                             **popen_kw)
     # Stash log handle on proc so _release_proc can close it on reap.
     proc._log_f = log_f
     # Register the Popen so _exit_code / _process_alive can use it.
     _PROCS[proc.pid] = proc
+    if chat:
+        try:
+            proc.stdin.write(
+                oc.chat_encode_user_message(stdin_prompt).encode("utf-8"))
+            proc.stdin.flush()
+        except (OSError, ValueError):
+            pass  # child died instantly; the normal reap path handles it
+        _start_chat_pump(proc, inbox_path, log_path)
     marker = {
         "state": "dispatched",
         "profile": profile.get("name"),

@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import threading
@@ -301,16 +302,19 @@ def test_spawn_agent_uses_valid_cwd(kanban, monkeypatch):
 
     class FakeProc:
         pid = 4242
+        stdin = io.BytesIO()
 
         def poll(self):
             return None
 
-    def fake_popen(cmd, stdout=None, stderr=None, cwd=None):
+    def fake_popen(cmd, stdout=None, stderr=None, cwd=None, **kw):
         captured["cmd"] = cmd
         captured["cwd"] = cwd
         return FakeProc()
 
     monkeypatch.setattr(orch.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(orch, "_start_chat_pump", lambda *a, **k: None)
+    monkeypatch.setattr(oc, "CHAT_DIR", os.path.join(kanban, "_orchestrator", "chat"))
 
     task = {"id": "1", "title": "x", "detail": "", "_board": "demo",
             "_path": os.path.join(kanban, "demo", "1.json")}
@@ -565,23 +569,23 @@ def test_summarize_progress_empty_log_still_records_ticket_context(kanban, monke
 
 def test_spawn_agent_sets_resumable_session_id(kanban, monkeypatch):
     """spawn_agent must mint a session id, pass it to the CLI via --session-id,
-    and return it on the marker so the ticket can record a resumable id.
-
-    RED against current code: spawn_agent neither passes --session-id nor returns
-    a sessionId, so a blocked ticket has no way to be manually taken over."""
+    and return it on the marker so the ticket can record a resumable id."""
     captured = {}
 
     class FakeProc:
         pid = 7777
+        stdin = io.BytesIO()
 
         def poll(self):
             return None
 
-    def fake_popen(cmd, stdout=None, stderr=None, cwd=None):
+    def fake_popen(cmd, stdout=None, stderr=None, cwd=None, **kw):
         captured["cmd"] = cmd
         return FakeProc()
 
     monkeypatch.setattr(orch.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(orch, "_start_chat_pump", lambda *a, **k: None)
+    monkeypatch.setattr(oc, "CHAT_DIR", os.path.join(kanban, "_orchestrator", "chat"))
 
     task = {"id": "1", "title": "x", "detail": "", "_board": "demo",
             "_path": os.path.join(kanban, "demo", "1.json")}
@@ -629,24 +633,27 @@ def test_tick_dispatch_records_claude_session_id(kanban, monkeypatch):
 def test_spawn_agent_resumes_prior_session_on_unblock(kanban, monkeypatch):
     """Re-dispatching an unblocked ticket that already ran once must RESUME its
     existing session via `--resume <sid>` — not mint a fresh `--session-id` — so
-    the agent keeps the context it had before it blocked. The resume prompt must
-    also carry the reason it was unblocked (the human's answer).
-
-    RED against current code: spawn_agent always mints a new uuid and passes
-    --session-id, throwing away the prior context on every unblock."""
+    the agent keeps the context it had before it blocked. The resume prompt
+    (now delivered via stdin in chat mode) must carry the human's answer."""
     captured = {}
 
     class FakeProc:
         pid = 9191
+
+        def __init__(self):
+            self.stdin = io.BytesIO()
 
         def poll(self):
             return None
 
     def fake_popen(cmd, stdout=None, stderr=None, cwd=None, **kw):
         captured["cmd"] = cmd
-        return FakeProc()
+        captured["proc"] = FakeProc()
+        return captured["proc"]
 
     monkeypatch.setattr(orch.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(orch, "_start_chat_pump", lambda *a, **k: None)
+    monkeypatch.setattr(oc, "CHAT_DIR", os.path.join(kanban, "_orchestrator", "chat"))
 
     task = {"id": "1", "title": "x", "detail": "the detail", "_board": "demo",
             "_path": os.path.join(kanban, "demo", "1.json"),
@@ -665,8 +672,10 @@ def test_spawn_agent_resumes_prior_session_on_unblock(kanban, monkeypatch):
     assert "--session-id" not in cmd, "resume must not also mint a new session id"
     # The marker keeps the resumed id so the ticket keeps pointing at one session.
     assert marker.get("sessionId") == "prior-sess"
-    # The resume prompt must convey the unblock reason (the human answer).
-    prompt = cmd[cmd.index("-p") + 1]
+    # The resume prompt is the first stream-json user message on stdin and
+    # must convey the unblock reason (the human answer).
+    raw = captured["proc"].stdin.getvalue().decode("utf-8")
+    prompt = json.loads(raw.splitlines()[0])["message"]["content"][0]["text"]
     assert "option A" in prompt and "go ahead" in prompt, (
         f"resume prompt must carry the human answer, got: {prompt}"
     )
@@ -679,6 +688,7 @@ def test_spawn_agent_fresh_dispatch_still_mints_session(kanban, monkeypatch):
 
     class FakeProc:
         pid = 9292
+        stdin = io.BytesIO()
 
         def poll(self):
             return None
@@ -688,6 +698,8 @@ def test_spawn_agent_fresh_dispatch_still_mints_session(kanban, monkeypatch):
         return FakeProc()
 
     monkeypatch.setattr(orch.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(orch, "_start_chat_pump", lambda *a, **k: None)
+    monkeypatch.setattr(oc, "CHAT_DIR", os.path.join(kanban, "_orchestrator", "chat"))
 
     task = {"id": "1", "title": "x", "detail": "", "_board": "demo",
             "_path": os.path.join(kanban, "demo", "1.json")}
@@ -728,6 +740,7 @@ def test_spawn_agent_returns_cwd_in_marker(kanban, monkeypatch):
 
     class FakeProc:
         pid = 8888
+        stdin = io.BytesIO()
 
         def poll(self):
             return None
@@ -737,6 +750,8 @@ def test_spawn_agent_returns_cwd_in_marker(kanban, monkeypatch):
         return FakeProc()
 
     monkeypatch.setattr(orch.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(orch, "_start_chat_pump", lambda *a, **k: None)
+    monkeypatch.setattr(oc, "CHAT_DIR", os.path.join(kanban, "_orchestrator", "chat"))
 
     task = {"id": "1", "title": "x", "detail": "", "_board": "demo",
             "_path": os.path.join(kanban, "demo", "1.json")}
@@ -813,14 +828,17 @@ def test_spawn_agent_uses_stream_json(kanban, monkeypatch):
 
     class FakeProc:
         pid = 4343
+        stdin = io.BytesIO()
         def poll(self):
             return None
 
-    def fake_popen(cmd, stdout=None, stderr=None, cwd=None):
+    def fake_popen(cmd, stdout=None, stderr=None, cwd=None, **kw):
         captured["cmd"] = cmd
         return FakeProc()
 
     monkeypatch.setattr(orch.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(orch, "_start_chat_pump", lambda *a, **k: None)
+    monkeypatch.setattr(oc, "CHAT_DIR", os.path.join(kanban, "_orchestrator", "chat"))
     task = {"id": "1", "title": "x", "detail": "", "_board": "demo",
             "_path": os.path.join(kanban, "demo", "1.json")}
     orch.spawn_agent(kanban, "demo", task, {"name": "g", "systemPrompt": "p"}, "m")
@@ -1641,6 +1659,7 @@ def test_spawn_agent_uses_fable_when_available(kanban, monkeypatch):
     class FakeProc:
         pid = 9901
         _log_f = None
+        stdin = io.BytesIO()
         def poll(self): return None
 
     def fake_popen(cmd, **kw):
@@ -1651,6 +1670,8 @@ def test_spawn_agent_uses_fable_when_available(kanban, monkeypatch):
         return p
 
     monkeypatch.setattr(orch.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(orch, "_start_chat_pump", lambda *a, **k: None)
+    monkeypatch.setattr(oc, "CHAT_DIR", os.path.join(kanban, "_orchestrator", "chat"))
     oc.write_profile(kanban, {"name": "backend", "whenToUse": "x"})
     task = {"id": "1", "title": "T", "_board": "demo",
             "_path": os.path.join(kanban, "demo", "1.json")}
@@ -1672,6 +1693,7 @@ def test_spawn_agent_falls_back_to_opus_when_fable_unavailable(kanban, monkeypat
     class FakeProc:
         pid = 9902
         _log_f = None
+        stdin = io.BytesIO()
         def poll(self): return None
 
     def fake_popen(cmd, **kw):
@@ -1682,6 +1704,8 @@ def test_spawn_agent_falls_back_to_opus_when_fable_unavailable(kanban, monkeypat
         return p
 
     monkeypatch.setattr(orch.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(orch, "_start_chat_pump", lambda *a, **k: None)
+    monkeypatch.setattr(oc, "CHAT_DIR", os.path.join(kanban, "_orchestrator", "chat"))
     oc.write_profile(kanban, {"name": "backend", "whenToUse": "x"})
     task = {"id": "1", "title": "T", "_board": "demo",
             "_path": os.path.join(kanban, "demo", "1.json")}
