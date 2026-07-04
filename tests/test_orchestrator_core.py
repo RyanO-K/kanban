@@ -789,3 +789,71 @@ def test_usage_pause_unset_reads_empty(kanban):
     assert oc.read_usage_pause(kanban) == {}
     assert oc.is_usage_paused(kanban, now_ts=500) is False
     assert oc.usage_pause_remaining(kanban, now_ts=500) == 0
+
+
+# --- Agent chat: pure helpers (spec docs/specs/2026-07-03-agent-chat-design.md) ---
+
+
+def test_chat_constants():
+    assert oc.CHAT_ENABLED is True
+    assert oc.CHAT_DIR == os.path.join(oc.ORCH_DIR, "chat")
+
+
+def test_chat_inbox_path_uses_chat_dir(monkeypatch):
+    # chat_inbox_path must read the module-global CHAT_DIR at call time so
+    # tests (and any future config) can repoint it.
+    monkeypatch.setattr(oc, "CHAT_DIR", os.path.join("x", "chat"))
+    assert oc.chat_inbox_path("demo", "7") == os.path.join("x", "chat", "demo__7.jsonl")
+    assert oc.chat_inbox_path("my-board", "12") == os.path.join(
+        "x", "chat", "my-board__12.jsonl")
+
+
+def test_chat_encode_user_message_shape():
+    line = oc.chat_encode_user_message("hello ünïcode")
+    assert line.endswith("\n")
+    assert "\n" not in line[:-1], "must be exactly one JSONL line"
+    assert json.loads(line) == {
+        "type": "user",
+        "message": {"role": "user",
+                    "content": [{"type": "text", "text": "hello ünïcode"}]},
+    }
+
+
+def test_chat_encode_user_message_preserves_newlines_in_text():
+    # Wrapped chat messages contain a literal \n ([Message from ...]\n<msg>);
+    # it must survive as an escaped newline inside the single JSONL line.
+    line = oc.chat_encode_user_message("[Message from ryan via Discord]\nhi")
+    assert "\n" not in line[:-1]
+    obj = json.loads(line)
+    assert obj["message"]["content"][0]["text"] == "[Message from ryan via Discord]\nhi"
+
+
+def test_chat_parse_inbox_line_valid():
+    raw = json.dumps({"message": "hi", "writer": "alice",
+                      "ts": "2026-07-03T00:00:00+00:00"})
+    assert oc.chat_parse_inbox_line(raw) == {
+        "message": "hi", "writer": "alice", "ts": "2026-07-03T00:00:00+00:00"}
+
+
+def test_chat_parse_inbox_line_defaults_missing_writer_and_ts():
+    assert oc.chat_parse_inbox_line(json.dumps({"message": "hi"})) == {
+        "message": "hi", "writer": "unknown", "ts": ""}
+
+
+def test_chat_parse_inbox_line_rejects_malformed():
+    assert oc.chat_parse_inbox_line("{not json") is None
+    assert oc.chat_parse_inbox_line("") is None
+    assert oc.chat_parse_inbox_line(json.dumps(["a", "list"])) is None
+    assert oc.chat_parse_inbox_line(json.dumps({"writer": "a"})) is None          # no message
+    assert oc.chat_parse_inbox_line(json.dumps({"message": ""})) is None          # empty
+    assert oc.chat_parse_inbox_line(json.dumps({"message": "   "})) is None       # whitespace
+    assert oc.chat_parse_inbox_line(json.dumps({"message": 42})) is None          # non-string
+
+
+def test_chat_should_close_truth_table():
+    # Close only when a result has been seen SINCE the last injected message
+    # AND the inbox is drained.
+    assert oc.chat_should_close(True, True) is True
+    assert oc.chat_should_close(True, False) is False
+    assert oc.chat_should_close(False, True) is False
+    assert oc.chat_should_close(False, False) is False

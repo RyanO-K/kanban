@@ -180,6 +180,79 @@ def now_iso():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+# --- Agent chat (stdin injection) --------------------------------------------
+#
+# A human can message a RUNNING agent (spec docs/specs/2026-07-03-agent-chat-
+# design.md): the kanban server appends lines to a per-run inbox file under
+# CHAT_DIR and the orchestrator's per-run pump thread relays them to the agent
+# process's stdin as stream-json user messages. The helpers here are pure so
+# the server, the pump, and the tests share one encoding/decision
+# implementation.
+
+# One-line escape hatch: set False to restore the legacy argv-prompt dispatch
+# (no streaming input, no pump threads; the chat endpoint then returns
+# 409 {"error": "chat disabled"}).
+CHAT_ENABLED = True
+
+CHAT_DIR = os.path.join(ORCH_DIR, "chat")
+
+
+def chat_inbox_path(board, ticket_id):
+    """The chat inbox file for one ticket's run: <CHAT_DIR>/<board>__<id>.jsonl.
+
+    Double underscore separates the board dir name from the id; both are
+    filesystem-safe already (same convention as the idle sidecar files).
+    Reads the module-global CHAT_DIR at call time so tests can repoint it.
+    """
+    return os.path.join(CHAT_DIR, f"{board}__{ticket_id}.jsonl")
+
+
+def chat_encode_user_message(text):
+    """One stream-json input line carrying *text* as a user message.
+
+    This exact shape is what `claude -p --input-format stream-json` consumes;
+    the initial prompt and every relayed chat message use it. Returns a single
+    JSON line terminated by \\n.
+    """
+    return json.dumps(
+        {"type": "user",
+         "message": {"role": "user",
+                     "content": [{"type": "text", "text": text}]}},
+        ensure_ascii=False) + "\n"
+
+
+def chat_parse_inbox_line(line):
+    """Parse one inbox JSONL line into {"message", "writer", "ts"}, or None.
+
+    Malformed JSON, a non-dict payload, or a missing/empty/non-string
+    `message` all return None — the pump skips such lines. A missing writer
+    defaults to "unknown", a missing ts to "".
+    """
+    try:
+        obj = json.loads(line)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(obj, dict):
+        return None
+    msg = obj.get("message")
+    if not isinstance(msg, str) or not msg.strip():
+        return None
+    return {"message": msg,
+            "writer": str(obj.get("writer") or "unknown"),
+            "ts": str(obj.get("ts") or "")}
+
+
+def chat_should_close(result_seen_after_last_send, inbox_empty):
+    """True when the pump should close the child's stdin, ending the run.
+
+    Close only when (a) the CLI has emitted a top-level result SINCE the last
+    user message we injected AND (b) no unsent inbox message is queued. If a
+    chat message arrives before close, it is sent instead and the agent runs
+    another turn; the next result re-arms the decision.
+    """
+    return bool(result_seen_after_last_send) and bool(inbox_empty)
+
+
 def branch_name(task):
     """The output branch name for a ticket: `ticket/<id>-<slug>`.
 
