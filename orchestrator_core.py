@@ -824,6 +824,23 @@ def parse_usage_limit(text):
     return {"resetAt": reset_at}
 
 
+# Login-error phrases the CLI prints when the agent process has no valid auth.
+# Both strings are matched case-insensitively anywhere in the log/output so a
+# stream-json blob with the phrase inside a result field is also caught.
+_LOGIN_ERROR_RE = re.compile(r"not logged in|please run /login", re.IGNORECASE)
+
+
+def parse_login_error(text):
+    """Detect a Claude login error in an agent's log/CLI output.
+
+    Returns True when the text contains "Not logged in" or "Please run /login"
+    (case-insensitive). Returns False for empty, None, or unrelated text.
+    """
+    if not text:
+        return False
+    return bool(_LOGIN_ERROR_RE.search(text))
+
+
 def _usage_pause_path(kanban_dir):
     return os.path.join(kanban_dir, "_orchestrator", "usage_pause.json")
 

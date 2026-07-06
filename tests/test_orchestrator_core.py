@@ -791,6 +791,42 @@ def test_usage_pause_unset_reads_empty(kanban):
     assert oc.usage_pause_remaining(kanban, now_ts=500) == 0
 
 
+# --- Ticket #95: login error detection ---
+
+def test_parse_login_error_not_logged_in():
+    """'Not logged in' in log text is detected as a login error."""
+    assert oc.parse_login_error("Error: Not logged in") is True
+
+
+def test_parse_login_error_please_run_login():
+    """'Please run /login' in log text is detected as a login error."""
+    assert oc.parse_login_error("Please run /login to authenticate") is True
+
+
+def test_parse_login_error_case_insensitive():
+    """Login error detection is case-insensitive."""
+    assert oc.parse_login_error("not logged in") is True
+    assert oc.parse_login_error("PLEASE RUN /LOGIN") is True
+
+
+def test_parse_login_error_in_stream_json():
+    """Login error detected anywhere in a stream-json blob."""
+    blob = '{"type":"result","is_error":true,"result":"Error: Not logged in. Please run /login"}'
+    assert oc.parse_login_error(blob) is True
+
+
+def test_parse_login_error_none_for_unrelated_text():
+    """Ordinary log output is not mistaken for a login error."""
+    assert oc.parse_login_error("Tool ran fine, session done") is False
+    assert oc.parse_login_error("") is False
+    assert oc.parse_login_error(None) is False
+
+
+def test_parse_login_error_none_for_usage_limit():
+    """A usage limit message does not trigger the login error detector."""
+    assert oc.parse_login_error("Claude AI usage limit reached|1719500000") is False
+
+
 # --- Agent chat: pure helpers (spec docs/specs/2026-07-03-agent-chat-design.md) ---
 
 
