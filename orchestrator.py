@@ -1722,6 +1722,8 @@ def tick(kanban_dir, *, opus_triage, summarize_progress=None, initial_triage=Non
             _finish_completion(kanban_dir, t)
             _add_history(t, t.get("status"), "completed")
             t["status"] = "completed"
+            # Clear any prior login-error flag — legitimate logs mean auth is working.
+            t.pop("loginError", None)
             oc.clear_marker(t)
             write_task(t["_path"], t)
             oc.append_activity(kanban_dir, {"ts": oc.now_iso(), "kind": "complete",
@@ -1757,6 +1759,16 @@ def tick(kanban_dir, *, opus_triage, summarize_progress=None, initial_triage=Non
                 oc.append_activity(kanban_dir, {
                     "ts": oc.now_iso(), "kind": "usage_limit", "board": t["_board"],
                     "ticket": t["id"], "pausedUntil": until})
+                continue
+            # A login error ("Not logged in" / "Please run /login") means the CLI
+            # has no valid auth — the agent cannot do real work. Record loginError
+            # on the ticket so the UI can surface it, and block for human action.
+            if oc.parse_login_error(tail):
+                t["loginError"] = True
+                _add_comment(t, "NEEDS HUMAN: agent is not logged in. "
+                                "Run `claude /login` or set ANTHROPIC_API_KEY, "
+                                "then re-queue this ticket.")
+                _finish_blocked(kanban_dir, t, "login_error")
                 continue
             _add_comment(t, "NEEDS HUMAN: agent exited unexpectedly. See the run log for details.")
             _finish_blocked(kanban_dir, t, "error")

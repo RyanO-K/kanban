@@ -1938,3 +1938,100 @@ def test_summarize_progress_fallback_has_no_log_tail(kanban, monkeypatch):
     assert "step X done" not in fallback, (
         "raw log tail must NOT be in the fallback"
     )
+
+
+# --- Ticket #95: login error handler ---
+
+def test_tick_login_error_blocks_ticket(kanban, monkeypatch):
+    """When a crashed agent's log contains 'Not logged in', the ticket is blocked
+    with loginError=True rather than a generic 'error' block."""
+    pid = 6161
+    p = _set_dispatched(kanban, "1", pid)
+    _write_log(kanban, "1", "Error: Not logged in")
+    oc.write_state(kanban, {"enabled": False, "concurrencyCap": 3,
+                            "stopAllRequested": False})
+
+    monkeypatch.setattr(orch, "_process_alive", lambda _pid: False)
+    monkeypatch.setattr(orch, "_exit_code", lambda _pid: 1)
+
+    orch.tick(kanban, opus_triage=lambda *a, **k: {"dispatch": []})
+
+    t1 = _read(p)
+    assert t1["status"] == "blocked", (
+        f"login-errored ticket should be blocked, got '{t1['status']}'"
+    )
+    assert t1.get("loginError") is True, (
+        f"loginError flag should be set to True, got {t1.get('loginError')!r}"
+    )
+    kinds = [e.get("kind") for e in oc.read_activity(kanban)]
+    assert "login_error" in kinds, f"expected a 'login_error' activity, got {kinds}"
+
+
+def test_tick_login_error_please_run_login(kanban, monkeypatch):
+    """'Please run /login' in the log also triggers the login error handler."""
+    pid = 6162
+    p = _set_dispatched(kanban, "1", pid)
+    _write_log(kanban, "1", "Please run /login to continue")
+    oc.write_state(kanban, {"enabled": False, "concurrencyCap": 3,
+                            "stopAllRequested": False})
+
+    monkeypatch.setattr(orch, "_process_alive", lambda _pid: False)
+    monkeypatch.setattr(orch, "_exit_code", lambda _pid: 1)
+
+    orch.tick(kanban, opus_triage=lambda *a, **k: {"dispatch": []})
+
+    t1 = _read(p)
+    assert t1["status"] == "blocked"
+    assert t1.get("loginError") is True
+
+
+def test_tick_login_error_cleared_on_completion(kanban, monkeypatch):
+    """When a previously login-errored ticket later completes successfully,
+    loginError is cleared from the ticket."""
+    pid = 6163
+    p = _set_dispatched(kanban, "1", pid)
+    oc.write_state(kanban, {"enabled": False, "concurrencyCap": 3,
+                            "stopAllRequested": False})
+
+    # Pre-set loginError on the ticket (as if a previous run set it).
+    t = _read(p)
+    t["loginError"] = True
+    # Add a Claude comment so adopted-path agent_left_signal returns "progress".
+    t.setdefault("comments", []).append(
+        {"writer": "Claude", "message": "Done!", "timestamp": oc.now_iso()}
+    )
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(t, f)
+
+    monkeypatch.setattr(orch, "_process_alive", lambda _pid: False)
+    monkeypatch.setattr(orch, "_exit_code", lambda _pid: 0)
+    monkeypatch.setattr(orch, "_finish_completion", lambda *a, **k: None)
+    monkeypatch.setattr(orch, "_save_completed_log", lambda *a, **k: None)
+
+    orch.tick(kanban, opus_triage=lambda *a, **k: {"dispatch": []})
+
+    t1 = _read(p)
+    assert t1["status"] == "completed"
+    assert "loginError" not in t1, (
+        f"loginError should be cleared on completion, got {t1.get('loginError')!r}"
+    )
+
+
+def test_tick_login_error_not_set_for_normal_crash(kanban, monkeypatch):
+    """A normal crash (not a login error) does NOT set loginError on the ticket."""
+    pid = 6164
+    p = _set_dispatched(kanban, "1", pid)
+    _write_log(kanban, "1", "Something else went wrong entirely")
+    oc.write_state(kanban, {"enabled": False, "concurrencyCap": 3,
+                            "stopAllRequested": False})
+
+    monkeypatch.setattr(orch, "_process_alive", lambda _pid: False)
+    monkeypatch.setattr(orch, "_exit_code", lambda _pid: 1)
+
+    orch.tick(kanban, opus_triage=lambda *a, **k: {"dispatch": []})
+
+    t1 = _read(p)
+    assert t1["status"] == "blocked"
+    assert "loginError" not in t1, (
+        f"loginError should not be set for a normal crash, got {t1.get('loginError')!r}"
+    )
