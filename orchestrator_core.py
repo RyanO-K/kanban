@@ -14,6 +14,21 @@ KANBAN_DIR = os.path.dirname(os.path.abspath(__file__))
 ORCH_DIR = os.path.join(KANBAN_DIR, "_orchestrator")
 CONFIG_DIR = os.path.join(KANBAN_DIR, "config")
 
+# Board directories live under a dedicated, gitignored `boards/` folder (ticket
+# #94) rather than loose at the .kanban root. Every per-board path resolution
+# routes through boards_root() so the location is defined in one place.
+BOARDS_SUBDIR = "boards"
+
+
+def boards_root(kanban_dir):
+    """The folder holding every board directory for a given .kanban tree."""
+    return os.path.join(kanban_dir, BOARDS_SUBDIR)
+
+
+def board_path(kanban_dir, board):
+    """Absolute path to a single board's directory under boards_root()."""
+    return os.path.join(boards_root(kanban_dir), board)
+
 # The orchestrator's own background LLM calls (triage every tick, the pre-kill
 # progress summarizer) default to Opus but are configurable so a user can downgrade
 # the highest-frequency background cost. Empty/missing falls back to this default.
@@ -275,7 +290,7 @@ def read_board_meta(kanban_dir, board):
     """
     if not board:
         return {}
-    return _read_json(os.path.join(kanban_dir, board, "_meta.json"), {})
+    return _read_json(os.path.join(board_path(kanban_dir, board), "_meta.json"), {})
 
 
 def commit_requirements_met(task, board_meta):

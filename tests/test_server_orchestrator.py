@@ -148,7 +148,7 @@ def test_activity_feed(server, kanban):
 
 def test_kill_queues_when_unreachable(server, kanban, monkeypatch):
     # Put an in-flight marker on ticket 1 with a bogus pid.
-    p = os.path.join(kanban, "demo", "1.json")
+    p = os.path.join(kanban, "boards", "demo", "1.json")
     with open(p, "r", encoding="utf-8") as f:
         t = json.load(f)
     t["orchestrator"] = {"state": "dispatched", "pid": 999999, "killRequested": False}
@@ -164,7 +164,7 @@ def test_kill_queues_when_unreachable(server, kanban, monkeypatch):
 
 
 def test_answer_written(server, kanban):
-    p = os.path.join(kanban, "demo", "1.json")
+    p = os.path.join(kanban, "boards", "demo", "1.json")
     with open(p, "r", encoding="utf-8") as f:
         t = json.load(f)
     t["status"] = "blocked"
@@ -192,7 +192,7 @@ def test_answer_preserves_comments_and_no_tmp_lingering(server, kanban):
     orchestrator.question field, comments survive.  If it reads once at
     request start and clobbers, comments may be lost and a .tmp may linger.
     """
-    p = os.path.join(kanban, "demo", "1.json")
+    p = os.path.join(kanban, "boards", "demo", "1.json")
     with open(p, "r", encoding="utf-8") as f:
         t = json.load(f)
     t["status"] = "blocked"
@@ -241,7 +241,7 @@ def test_direct_kill_does_not_rewrite_file(server, kanban, monkeypatch):
     import orchestrator as orch
     import time as _time
 
-    p = os.path.join(kanban, "demo", "1.json")
+    p = os.path.join(kanban, "boards", "demo", "1.json")
     with open(p, "r", encoding="utf-8") as f:
         t = json.load(f)
     t["orchestrator"] = {"state": "dispatched", "pid": 54321, "killRequested": False}

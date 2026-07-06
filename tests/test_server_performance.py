@@ -40,8 +40,8 @@ def test_owned_pids_includes_in_progress_ticket_pids_after_reboot(monkeypatch, t
     """After a server reboot _PROCS is empty, but in_progress tickets with
     orchestrator.pid must still be counted as owned so the Performance tab
     does not show them as external."""
-    board_dir = tmp_path / "kanban-dev"
-    board_dir.mkdir()
+    board_dir = tmp_path / "boards" / "kanban-dev"
+    board_dir.mkdir(parents=True)
     # Write a _meta.json so is_board() recognises it.
     (board_dir / "_meta.json").write_text(json.dumps({"project": "Test"}), encoding="utf-8")
     # An in_progress ticket with an orchestrator PID — this is the session the
@@ -110,8 +110,8 @@ def test_owned_pids_includes_procs_and_server_ops(monkeypatch, tmp_path):
 
 def test_owned_pids_tolerates_malformed_ticket(monkeypatch, tmp_path):
     """Malformed or unreadable ticket files must not crash _owned_pids."""
-    board_dir = tmp_path / "kanban-dev"
-    board_dir.mkdir()
+    board_dir = tmp_path / "boards" / "kanban-dev"
+    board_dir.mkdir(parents=True)
     (board_dir / "_meta.json").write_text(json.dumps({"project": "Test"}), encoding="utf-8")
     # Write a ticket with invalid JSON.
     (board_dir / "1.json").write_text("not valid json", encoding="utf-8")

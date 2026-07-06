@@ -184,7 +184,7 @@ def test_resolve_run_log_confines_to_runs(monkeypatch, tmp_path):
 
 def _make_tree(monkeypatch, tmp_path, marker, status="in_progress", log_text=None):
     kanban = tmp_path / ".kanban"
-    board = kanban / "demo"
+    board = kanban / "boards" / "demo"
     runs = kanban / "_orchestrator" / "runs"
     board.mkdir(parents=True)
     runs.mkdir(parents=True)
@@ -242,7 +242,7 @@ def test_task_log_completed_no_orchestrator_uses_completed_log(monkeypatch, tmp_
     saved completedLog turns in that state.
     """
     kanban = tmp_path / ".kanban"
-    board = kanban / "demo"
+    board = kanban / "boards" / "demo"
     runs = kanban / "_orchestrator" / "runs"
     board.mkdir(parents=True)
     runs.mkdir(parents=True)
@@ -278,7 +278,7 @@ def test_task_log_runlogfile_survives_clear_marker(monkeypatch, tmp_path):
     top-level `runLogFile` makes it survive clear_marker so task_log can serve it.
     """
     kanban = tmp_path / ".kanban"
-    board = kanban / "demo"
+    board = kanban / "boards" / "demo"
     runs = kanban / "_orchestrator" / "runs"
     board.mkdir(parents=True)
     runs.mkdir(parents=True)

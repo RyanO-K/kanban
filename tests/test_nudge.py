@@ -54,7 +54,7 @@ def test_nudge_triggers_tick(server, kanban, monkeypatch):
     import orchestrator_core as oc
 
     # Ticket 1 is already in 'todo'; no deps, so a tick should promote it to 'ready'.
-    p = os.path.join(kanban, "demo", "1.json")
+    p = os.path.join(kanban, "boards", "demo", "1.json")
     with open(p, "r", encoding="utf-8") as f:
         t = json.load(f)
     assert t["status"] == "todo"

@@ -15,12 +15,20 @@ Run from anywhere:  python .kanban/backfill_kanban_guide.py
 import json
 import os
 
-from kanban_server import KANBAN_DIR, KANBAN_GUIDE, META_FILE
+from kanban_server import KANBAN_DIR, KANBAN_GUIDE, META_FILE, boards_root
 
 
 def iter_ticket_files(kanban_dir):
-    """Yield every ticket file path across all boards (dirs with a _meta.json)."""
-    for entry in os.scandir(kanban_dir):
+    """Yield every ticket file path across all boards (dirs with a _meta.json).
+
+    Boards live under the dedicated `boards/` folder (ticket #94), so scan there.
+    A missing folder just means no boards.
+    """
+    try:
+        entries = os.scandir(boards_root())
+    except FileNotFoundError:
+        return
+    for entry in entries:
         if not entry.is_dir():
             continue
         if not os.path.isfile(os.path.join(entry.path, META_FILE)):

@@ -1,8 +1,9 @@
 # .kanban board — agent guide
 
-A lightweight file-based kanban. Each subdirectory of `.kanban/` is one **board**;
-each board holds plain JSON ticket files. There's a small Python server + HTML UI,
-but **agents normally just read and edit the JSON files directly** — no server needed.
+A lightweight file-based kanban. Boards live under a dedicated, gitignored
+`boards/` folder inside `.kanban/`; each board is one subdirectory holding plain
+JSON ticket files. There's a small Python server + HTML UI, but **agents normally
+just read and edit the JSON files directly** — no server needed.
 
 ## Layout
 
@@ -11,12 +12,19 @@ but **agents normally just read and edit the JSON files directly** — no server
   kanban_server.py        # optional read/write API + UI server (port 8745)
   kanban.html             # the board UI (served at /)
   _meta.template.json     # template for a new board's _meta.json
-  <board-slug>/           # one directory per board (slug = its id)
-    _meta.json            # board metadata: project, updated, context, openQuestions, outOfScope
-    <id>.json             # one ticket per file (id is numeric: 1.json, 2.json, ...)
+  migrate_boards_folder.py  # one-shot: relocate loose root boards into boards/ (ticket #94)
+  boards/                 # dedicated, gitignored folder holding every board (ticket #94)
+    <board-slug>/         # one directory per board (slug = its id)
+      _meta.json          # board metadata: project, updated, context, openQuestions, outOfScope
+      <id>.json           # one ticket per file (id is numeric: 1.json, 2.json, ...)
 ```
 
-A directory is only a board if it contains `_meta.json` (so `__pycache__` etc. are ignored).
+A directory under `boards/` is only a board if it contains `_meta.json` (so
+`__pycache__` etc. are ignored). The `boards/` folder is gitignored — board data
+is local per-machine state and is never tracked. Board discovery
+(`kanban_server.scan_boards`, `orchestrator.load_all_tasks`) and per-board path
+resolution route through a single `boards_root()` helper, so the location is
+defined in one place.
 
 ## Ticket shape
 

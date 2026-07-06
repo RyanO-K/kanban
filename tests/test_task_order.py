@@ -25,7 +25,7 @@ def board(kanban, monkeypatch):
 
 
 def test_set_order(board):
-    p = os.path.join(board, "demo", "1.json")
+    p = os.path.join(board, "boards", "demo", "1.json")
     result, status = ks.update_task_order("demo", "1", 3)
     assert status == 200
     assert _read(p)["order"] == 3
@@ -35,11 +35,11 @@ def test_update_order(board):
     ks.update_task_order("demo", "1", 5)
     result, status = ks.update_task_order("demo", "1", 1)
     assert status == 200
-    assert _read(os.path.join(board, "demo", "1.json"))["order"] == 1
+    assert _read(os.path.join(board, "boards", "demo", "1.json"))["order"] == 1
 
 
 def test_clear_order(board):
-    p = os.path.join(board, "demo", "1.json")
+    p = os.path.join(board, "boards", "demo", "1.json")
     ks.update_task_order("demo", "1", 2)
     result, status = ks.update_task_order("demo", "1", None)
     assert status == 200
@@ -49,7 +49,7 @@ def test_clear_order(board):
 def test_invalid_order_rejected(board):
     result, status = ks.update_task_order("demo", "1", "banana")
     assert status == 400
-    assert "order" not in _read(os.path.join(board, "demo", "1.json"))
+    assert "order" not in _read(os.path.join(board, "boards", "demo", "1.json"))
 
 
 def test_unknown_board_is_404(board):
@@ -63,7 +63,7 @@ def test_unknown_ticket_is_404(board):
 
 
 def test_order_preserves_other_fields(board):
-    p = os.path.join(board, "demo", "1.json")
+    p = os.path.join(board, "boards", "demo", "1.json")
     ks.update_task_order("demo", "1", 7)
     after = _read(p)
     assert after["title"] == "First"

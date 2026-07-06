@@ -6,5 +6,7 @@ _orchestrator/docker/env/
 *.json
 !config/*.json
 _orchestrator/orchestrator.lock
-/kanban-dev
+# Board directories now live under a dedicated folder (ticket #94) and are
+# local per-machine state, never tracked.
+boards/
 .claude/worktrees/

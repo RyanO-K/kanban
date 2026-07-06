@@ -43,7 +43,7 @@ def _req(port, method, path, body=None, headers=None):
 
 def _make_running(kanban, tid="1"):
     """Mark a ticket as a live run: dispatched marker + in_progress status."""
-    p = os.path.join(kanban, "demo", f"{tid}.json")
+    p = os.path.join(kanban, "boards", "demo", f"{tid}.json")
     with open(p, "r", encoding="utf-8") as f:
         t = json.load(f)
     t["status"] = "in_progress"
@@ -108,7 +108,7 @@ def test_chat_409_when_not_running(server, kanban):
     assert body == {"error": "not running"}
 
     # Dispatched marker but wrong status (e.g. blocked) is also "not running".
-    p = os.path.join(kanban, "demo", "2.json")
+    p = os.path.join(kanban, "boards", "demo", "2.json")
     with open(p, "r", encoding="utf-8") as f:
         t = json.load(f)
     t["status"] = "blocked"

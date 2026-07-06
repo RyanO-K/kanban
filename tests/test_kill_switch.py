@@ -60,7 +60,7 @@ def test_auto_push_enabled_default_true_and_coerces():
 
 def _completed_task(kanban):
     return {"id": "1", "title": "First", "_board": "demo",
-            "_path": os.path.join(kanban, "demo", "1.json")}
+            "_path": os.path.join(kanban, "boards", "demo", "1.json")}
 
 
 def test_finish_completion_skips_all_git_when_autocommit_off(kanban, monkeypatch):
