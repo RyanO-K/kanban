@@ -155,3 +155,43 @@ def test_put_meta_renames_project(server):
     status, files = _req(server, "GET", "/api/files")
     demo = next(f for f in files if f["filename"] == "demo")
     assert demo["project"] == "Renamed"
+
+
+# --- useDocker optional per-board (ticket #87) --------------------------------
+
+def test_disabling_use_docker_clears_env_vars(board_meta):
+    # Seed envVars on a Docker-enabled board, then turn Docker off.
+    ks.update_board_meta("demo", {"useDocker": True, "envVars": {"FOO": "bar"}})
+    ks.update_board_meta("demo", {"useDocker": False})
+    with open(os.path.join(board_meta, "demo", "_meta.json"), encoding="utf-8") as f:
+        meta = json.load(f)
+    assert "envVars" not in meta
+
+
+def test_disabling_use_docker_clears_passthrough_env(board_meta):
+    ks.update_board_meta("demo", {"useDocker": True, "passthroughEnv": ["GITHUB_TOKEN"]})
+    ks.update_board_meta("demo", {"useDocker": False})
+    with open(os.path.join(board_meta, "demo", "_meta.json"), encoding="utf-8") as f:
+        meta = json.load(f)
+    assert "passthroughEnv" not in meta
+
+
+def test_enabling_use_docker_preserves_env_vars(board_meta):
+    # Turning Docker ON (or back ON) does not clear the container config.
+    ks.update_board_meta("demo", {"useDocker": True, "envVars": {"FOO": "bar"}})
+    ks.update_board_meta("demo", {"useDocker": True})
+    with open(os.path.join(board_meta, "demo", "_meta.json"), encoding="utf-8") as f:
+        meta = json.load(f)
+    assert meta.get("envVars") == {"FOO": "bar"}
+
+
+def test_disabling_use_docker_via_http_clears_container_config(server):
+    # End-to-end: the PUT route also clears container config when Docker is turned off.
+    _req(server, "PUT", "/api/board/demo/meta",
+         {"useDocker": True, "envVars": {"K": "v"}, "passthroughEnv": ["TOKEN"]})
+    status, body = _req(server, "PUT", "/api/board/demo/meta", {"useDocker": False})
+    assert status == 200
+    status, board = _req(server, "GET", "/api/board/demo")
+    assert board.get("useDocker") is False
+    assert "envVars" not in board
+    assert "passthroughEnv" not in board
