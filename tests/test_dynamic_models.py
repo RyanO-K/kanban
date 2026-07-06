@@ -133,3 +133,66 @@ def test_get_api_models(server):
     assert r.status == 200
     assert "models" in body
     assert isinstance(body["models"], list)
+
+
+# --- Ticket #86: HTML fModel select must not have hardcoded claude options ---
+
+import os
+import re
+
+
+def _read_kanban_html():
+    """Read kanban.html from the same directory as kanban_server.py."""
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return open(os.path.join(here, "kanban.html"), encoding="utf-8").read()
+
+
+def _read_kanban_js():
+    """Read kanban.js from the same directory as kanban_server.py."""
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return open(os.path.join(here, "kanban.js"), encoding="utf-8").read()
+
+
+def test_fmodel_select_has_no_hardcoded_claude_options():
+    """kanban.html's fModel <select> must contain only the (default) option.
+
+    Model options are populated at runtime by loadModelOptions() in kanban.js
+    so the picklist reflects the live Anthropic catalog, not a hand-maintained
+    static list. Any hardcoded claude-* <option> inside fModel is a regression.
+    """
+    html = _read_kanban_html()
+    # Extract the fModel select block
+    m = re.search(
+        r'id=["\']fModel["\'][^>]*>(.*?)</select>',
+        html,
+        re.IGNORECASE | re.DOTALL,
+    )
+    assert m, "fModel select not found in kanban.html"
+    inner = m.group(1)
+    # There must be no hardcoded claude-* option values inside fModel
+    assert not re.search(r'value=["\']claude-', inner, re.IGNORECASE), (
+        "fModel select has hardcoded claude-* options; "
+        "these must be populated dynamically by loadModelOptions() in kanban.js"
+    )
+
+
+def test_load_model_options_populates_fmodel_select():
+    """kanban.js's loadModelOptions must update the fModel select element.
+
+    After fetching /api/models, the JS must repopulate both the in-memory
+    MODEL_OPTIONS array and the fModel select DOM element so the Create Task
+    modal reflects the live model catalog.
+    """
+    js = _read_kanban_js()
+    # The loadModelOptions IIFE must reference the fModel element
+    load_fn_match = re.search(
+        r'async function loadModelOptions\(\).*?}\s*\)\(\)',
+        js,
+        re.DOTALL,
+    )
+    assert load_fn_match, "loadModelOptions function not found in kanban.js"
+    fn_body = load_fn_match.group(0)
+    assert "fModel" in fn_body, (
+        "loadModelOptions() does not populate the fModel select element; "
+        "add DOM update logic to keep the Create Task modal in sync"
+    )

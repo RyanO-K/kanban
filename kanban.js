@@ -40,6 +40,14 @@ const MODEL_OPTIONS = [
     if(data && Array.isArray(data.models) && data.models.length){
       MODEL_OPTIONS.length = 1; // keep the "(default)" entry
       data.models.forEach(m=>MODEL_OPTIONS.push({value:m.value, label:m.label}));
+      // Repopulate the Create Task modal's fModel select so it reflects the
+      // live catalog rather than the static HTML fallback (ticket #86).
+      const sel = document.getElementById("fModel");
+      if(sel){
+        const cur = sel.value;
+        sel.innerHTML = MODEL_OPTIONS.map(m=>'<option value="'+m.value+'">'+m.label+'</option>').join("");
+        sel.value = cur; // restore selection if still valid
+      }
     }
   }catch(e){}
 })();
