@@ -36,7 +36,7 @@ def server(kanban, monkeypatch):
 def board_with_profile(kanban):
     """Add a ready ticket and a profile to the temp kanban dir."""
     import orchestrator_core as oc
-    board = os.path.join(kanban, "demo")
+    board = os.path.join(kanban, "boards", "demo")
     # Move ticket 1 to ready so it can be dispatched.
     p = os.path.join(board, "1.json")
     with open(p, "r", encoding="utf-8") as f:
@@ -110,7 +110,7 @@ def test_drag_to_in_progress_writes_marker_and_session(server, board_with_profil
 
     _req(server, "PATCH", "/api/board/demo/task/1", {"column": "in_progress"})
 
-    p = os.path.join(board_with_profile, "demo", "1.json")
+    p = os.path.join(board_with_profile, "boards", "demo", "1.json")
     with open(p, "r", encoding="utf-8") as f:
         t = json.load(f)
 
@@ -122,7 +122,7 @@ def test_drag_to_in_progress_writes_marker_and_session(server, board_with_profil
 def test_drag_to_in_progress_no_profiles_still_moves(server, kanban, monkeypatch):
     """With no profiles, dragging to in_progress still moves the status (no spawn)."""
     # No profiles in kanban fixture.
-    p = os.path.join(kanban, "demo", "1.json")
+    p = os.path.join(kanban, "boards", "demo", "1.json")
     with open(p, "r", encoding="utf-8") as f:
         t = json.load(f)
     t["status"] = "ready"
@@ -176,7 +176,7 @@ def test_drag_to_in_progress_records_activity(server, board_with_profile, monkey
 def test_drag_out_of_in_progress_kills_agent(server, kanban, monkeypatch):
     """PATCH to a non-in_progress column for an in-flight ticket should kill the agent."""
     # Set up an in-flight ticket.
-    p = os.path.join(kanban, "demo", "1.json")
+    p = os.path.join(kanban, "boards", "demo", "1.json")
     with open(p, "r", encoding="utf-8") as f:
         t = json.load(f)
     t["status"] = "in_progress"
@@ -207,7 +207,7 @@ def test_drag_out_of_in_progress_kills_agent(server, kanban, monkeypatch):
 
 def test_drag_out_of_in_progress_writes_summary_comment(server, kanban, monkeypatch):
     """Moving an in-flight ticket out of in_progress should leave a summary comment."""
-    p = os.path.join(kanban, "demo", "1.json")
+    p = os.path.join(kanban, "boards", "demo", "1.json")
     with open(p, "r", encoding="utf-8") as f:
         t = json.load(f)
     t["status"] = "in_progress"
@@ -241,7 +241,7 @@ def test_drag_out_of_in_progress_writes_summary_comment(server, kanban, monkeypa
 
 def test_drag_out_of_in_progress_clears_marker(server, kanban, monkeypatch):
     """Moving out of in_progress should clear the orchestrator marker."""
-    p = os.path.join(kanban, "demo", "1.json")
+    p = os.path.join(kanban, "boards", "demo", "1.json")
     with open(p, "r", encoding="utf-8") as f:
         t = json.load(f)
     t["status"] = "in_progress"
@@ -274,7 +274,7 @@ def test_drag_out_of_in_progress_clears_marker(server, kanban, monkeypatch):
 
 def test_drag_out_of_in_progress_no_marker_is_noop(server, kanban, monkeypatch):
     """Moving a ticket out of in_progress with no orchestrator marker is a no-op kill."""
-    p = os.path.join(kanban, "demo", "1.json")
+    p = os.path.join(kanban, "boards", "demo", "1.json")
     with open(p, "r", encoding="utf-8") as f:
         t = json.load(f)
     t["status"] = "in_progress"
@@ -295,7 +295,7 @@ def test_drag_out_of_in_progress_no_marker_is_noop(server, kanban, monkeypatch):
 def test_drag_within_in_progress_no_spawn(server, board_with_profile, monkeypatch):
     """PATCH column=in_progress when already in_progress should NOT spawn again."""
     # Set up an already in-flight ticket.
-    p = os.path.join(board_with_profile, "demo", "1.json")
+    p = os.path.join(board_with_profile, "boards", "demo", "1.json")
     with open(p, "r", encoding="utf-8") as f:
         t = json.load(f)
     t["status"] = "in_progress"

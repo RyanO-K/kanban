@@ -31,14 +31,14 @@ def board(kanban, monkeypatch):
 
 
 def test_set_model(board):
-    p = os.path.join(board, "demo", "1.json")
+    p = os.path.join(board, "boards", "demo", "1.json")
     result, status = ks.update_task_model("demo", "1", "claude-opus-4-8")
     assert status == 200
     assert _read(p)["model"] == "claude-opus-4-8"
 
 
 def test_clear_model(board):
-    p = os.path.join(board, "demo", "1.json")
+    p = os.path.join(board, "boards", "demo", "1.json")
     ks.update_task_model("demo", "1", "claude-sonnet-4-6")
     result, status = ks.update_task_model("demo", "1", "")
     assert status == 200
@@ -48,12 +48,12 @@ def test_clear_model(board):
 def test_reject_unknown_model(board):
     result, status = ks.update_task_model("demo", "1", "gpt-9")
     assert status == 400
-    assert "model" not in _read(os.path.join(board, "demo", "1.json"))
+    assert "model" not in _read(os.path.join(board, "boards", "demo", "1.json"))
 
 
 def test_set_model_preserves_concurrent_comment(board):
     """The re-read-before-write must not clobber a concurrent sub-agent write."""
-    p = os.path.join(board, "demo", "1.json")
+    p = os.path.join(board, "boards", "demo", "1.json")
 
     # Simulate a sub-agent comment landing after the caller's read but before
     # write by patching write_ticket to inject then delegate.
@@ -82,7 +82,7 @@ def test_set_model_preserves_concurrent_comment(board):
 
 def test_dispatch_honors_ticket_model(kanban, monkeypatch):
     """A model pinned on the ticket wins over the profile default at dispatch."""
-    p = os.path.join(kanban, "demo", "1.json")
+    p = os.path.join(kanban, "boards", "demo", "1.json")
     t = _read(p)
     t["model"] = "claude-haiku-4-5-20251001"
     _write(p, t)

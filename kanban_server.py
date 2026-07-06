@@ -83,6 +83,32 @@ HTML_PATH = os.path.join(KANBAN_DIR, "kanban.html")
 CSS_PATH = os.path.join(KANBAN_DIR, "kanban.css")
 JS_PATH = os.path.join(KANBAN_DIR, "kanban.js")
 META_FILE = "_meta.json"
+# Board directories live under a dedicated `boards/` folder (ticket #94), which
+# is gitignored — keeping the .kanban root clean of loose board dirs mixed in
+# with source. Board discovery and per-board path resolution route through
+# boards_root() so the location is defined once and honors a monkeypatched
+# KANBAN_DIR (it re-derives from KANBAN_DIR at call time rather than being a
+# frozen module constant).
+BOARDS_SUBDIR = "boards"
+
+
+def boards_root():
+    """Absolute path to the dedicated folder that holds every board dir."""
+    return os.path.join(KANBAN_DIR, BOARDS_SUBDIR)
+
+
+def _scandir_boards():
+    """Scan the boards folder, yielding its entries (empty if it doesn't exist).
+
+    A fresh tree may not have created `boards/` yet, so a missing folder is not
+    an error — it just means there are no boards.
+    """
+    try:
+        return list(os.scandir(boards_root()))
+    except FileNotFoundError:
+        return []
+
+
 # Specs / plans live as markdown under .kanban/docs/. A doc associates itself
 # with a ticket via a `**Ticket:** `.kanban/<board>/<id>.json`` line in its header
 # (the convention used by the brainstorming/writing-plans skills).
@@ -280,7 +306,7 @@ def board_dir(slug):
     safe = safe_segment(slug)
     if safe is None:
         return None, slug
-    return os.path.join(KANBAN_DIR, safe), safe
+    return os.path.join(boards_root(), safe), safe
 
 
 def ticket_path(board_path, task_id):
@@ -479,7 +505,7 @@ def read_doc(rel_path):
 
 def scan_boards():
     boards = []
-    for entry in sorted(os.scandir(KANBAN_DIR), key=lambda e: e.name):
+    for entry in sorted(_scandir_boards(), key=lambda e: e.name):
         if not entry.is_dir() or not is_board(entry.path):
             continue
         slug = entry.name
@@ -503,7 +529,7 @@ def load_all_boards():
     tasks = []
     latest_mtime = 0.0
     spec_index = build_spec_index()
-    for entry in sorted(os.scandir(KANBAN_DIR), key=lambda e: e.name):
+    for entry in sorted(_scandir_boards(), key=lambda e: e.name):
         if not entry.is_dir() or not is_board(entry.path):
             continue
         slug = entry.name
@@ -1130,7 +1156,7 @@ def _ticket_file(board, task_id):
     isafe = _oc.safe_name(f"{task_id}.json")
     if bsafe is None or isafe is None:
         return None
-    return os.path.join(KANBAN_DIR, bsafe, isafe)
+    return os.path.join(boards_root(), bsafe, isafe)
 
 
 # --- Live logs -------------------------------------------------------------
@@ -1333,7 +1359,7 @@ def _ticket_agent_pids():
     """
     pids = set()
     try:
-        for entry in os.scandir(KANBAN_DIR):
+        for entry in _scandir_boards():
             if not entry.is_dir() or not is_board(entry.path):
                 continue
             for tfile in os.scandir(entry.path):

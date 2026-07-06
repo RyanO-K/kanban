@@ -11,9 +11,13 @@ sys.path.insert(0, KANBAN_SRC)
 
 @pytest.fixture
 def kanban(tmp_path):
-    """A temp .kanban tree with one board and two tickets."""
+    """A temp .kanban tree with one board and two tickets.
+
+    Boards live under the dedicated `boards/` folder (ticket #94), so the demo
+    board is created at `<root>/boards/demo`.
+    """
     root = tmp_path / ".kanban"
-    board = root / "demo"
+    board = root / "boards" / "demo"
     board.mkdir(parents=True)
     (board / "_meta.json").write_text(json.dumps({"project": "Demo"}), encoding="utf-8")
     (board / "1.json").write_text(

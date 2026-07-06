@@ -19,7 +19,7 @@ def _read(path):
 
 
 def test_write_ticket_is_atomic_on_failure(kanban):
-    path = os.path.join(kanban, "demo", "1.json")
+    path = os.path.join(kanban, "boards", "demo", "1.json")
     original = _read(path)
 
     def boom(*a, **k):
@@ -36,7 +36,7 @@ def test_write_ticket_is_atomic_on_failure(kanban):
 
 
 def test_touch_meta_is_atomic_on_failure(kanban):
-    path = os.path.join(kanban, "demo", "_meta.json")
+    path = os.path.join(kanban, "boards", "demo", "_meta.json")
     original = _read(path)
 
     real_dump = ks.json.dump
@@ -48,14 +48,14 @@ def test_touch_meta_is_atomic_on_failure(kanban):
         # Only the write half should blow up; the read half uses json.load.
         mp.setattr(ks.json, "dump", boom)
         with pytest.raises(RuntimeError):
-            ks.touch_meta(os.path.join(kanban, "demo"))
+            ks.touch_meta(os.path.join(kanban, "boards", "demo"))
 
     assert _read(path) == original
     assert not os.path.exists(path + ".tmp")
 
 
 def test_write_ticket_persists_via_replace(kanban):
-    path = os.path.join(kanban, "demo", "1.json")
+    path = os.path.join(kanban, "boards", "demo", "1.json")
     ks.write_ticket(path, {"id": "1", "title": "Done", "status": "completed"})
     assert _read(path)["status"] == "completed"
     assert not os.path.exists(path + ".tmp")

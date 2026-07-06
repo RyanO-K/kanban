@@ -95,7 +95,7 @@ def test_docker_image_tag_and_container_name():
 
 def test_translate_host_paths(tmp_path):
     host = str(tmp_path)
-    ticket = os.path.join(host, ".AI-kanban", "demo", "1.json")
+    ticket = os.path.join(host, ".AI-kanban", "boards", "demo", "1.json")
     out = oc.translate_host_paths(f"edit {ticket} now", host)
     assert "/workspace" in out
     assert host not in out
@@ -152,7 +152,7 @@ def _docker_board(kanban, env=None):
     meta = {"project": "Demo", "useDocker": True}
     if env is not None:
         meta["envVars"] = env
-    with open(os.path.join(kanban, "demo", "_meta.json"), "w", encoding="utf-8") as f:
+    with open(os.path.join(kanban, "boards", "demo", "_meta.json"), "w", encoding="utf-8") as f:
         json.dump(meta, f)
     dockerdir = os.path.join(kanban, "_orchestrator", "docker")
     os.makedirs(dockerdir, exist_ok=True)
@@ -197,7 +197,7 @@ def test_spawn_agent_docker_runs_in_container(kanban, monkeypatch):
     monkeypatch.setattr(orch.subprocess, "Popen", fake_popen)
 
     task = {"id": "1", "title": "x", "detail": "", "_board": "demo",
-            "_path": os.path.join(kanban, "demo", "1.json")}
+            "_path": os.path.join(kanban, "boards", "demo", "1.json")}
     marker = orch.spawn_agent(kanban, "demo", task,
                               {"name": "g", "systemPrompt": "p"}, "m")
 
@@ -246,7 +246,7 @@ def test_spawn_agent_docker_forwards_api_key(kanban, monkeypatch):
 
     monkeypatch.setattr(orch.subprocess, "Popen", fake_popen)
     task = {"id": "1", "title": "x", "detail": "", "_board": "demo",
-            "_path": os.path.join(kanban, "demo", "1.json")}
+            "_path": os.path.join(kanban, "boards", "demo", "1.json")}
     orch.spawn_agent(kanban, "demo", task, {"name": "g", "systemPrompt": "p"}, "m")
     cmd = captured["cmd"]
     # The host's credential is forwarded by name (value inherited), never echoed.
@@ -273,7 +273,7 @@ def test_spawn_agent_non_docker_has_no_container(kanban, monkeypatch):
     monkeypatch.setattr(orch, "_start_chat_pump", lambda *a, **k: None)
     monkeypatch.setattr(oc, "CHAT_DIR", os.path.join(kanban, "_orchestrator", "chat"))
     task = {"id": "1", "title": "x", "detail": "", "_board": "demo",
-            "_path": os.path.join(kanban, "demo", "1.json")}
+            "_path": os.path.join(kanban, "boards", "demo", "1.json")}
     marker = orch.spawn_agent(kanban, "demo", task,
                               {"name": "g", "systemPrompt": "p"}, "m")
     assert "containerName" not in marker
@@ -312,7 +312,7 @@ def test_server_persists_docker_meta(kanban, monkeypatch):
     monkeypatch.setattr(ks, "KANBAN_DIR", kanban)
     ks.update_board_meta("demo", {"useDocker": True,
                                   "envVars": {"FOO": "bar", "bad key": "x"}})
-    meta = json.load(open(os.path.join(kanban, "demo", "_meta.json"), encoding="utf-8"))
+    meta = json.load(open(os.path.join(kanban, "boards", "demo", "_meta.json"), encoding="utf-8"))
     assert meta["useDocker"] is True
     assert meta["envVars"] == {"FOO": "bar"}  # invalid key sanitized out
 
@@ -326,7 +326,7 @@ def test_server_empty_env_vars_removes_field(kanban, monkeypatch):
     monkeypatch.setattr(ks, "KANBAN_DIR", kanban)
     ks.update_board_meta("demo", {"envVars": {"FOO": "bar"}})
     ks.update_board_meta("demo", {"envVars": {}})
-    meta = json.load(open(os.path.join(kanban, "demo", "_meta.json"), encoding="utf-8"))
+    meta = json.load(open(os.path.join(kanban, "boards", "demo", "_meta.json"), encoding="utf-8"))
     assert "envVars" not in meta
 
 
@@ -386,7 +386,7 @@ def test_docker_dispatch_passthrough_ordering_and_warning(kanban, monkeypatch):
 
 
 def test_spawn_agent_docker_forwards_passthrough_env(kanban, monkeypatch):
-    with open(os.path.join(kanban, "demo", "_meta.json"), "w",
+    with open(os.path.join(kanban, "boards", "demo", "_meta.json"), "w",
               encoding="utf-8") as f:
         json.dump({"project": "Demo", "useDocker": True,
                    "passthroughEnv": ["GITHUB_TOKEN"]}, f)
@@ -414,7 +414,7 @@ def test_spawn_agent_docker_forwards_passthrough_env(kanban, monkeypatch):
 
     monkeypatch.setattr(orch.subprocess, "Popen", fake_popen)
     task = {"id": "1", "title": "x", "detail": "", "_board": "demo",
-            "_path": os.path.join(kanban, "demo", "1.json")}
+            "_path": os.path.join(kanban, "boards", "demo", "1.json")}
     orch.spawn_agent(kanban, "demo", task, {"name": "g", "systemPrompt": "p"}, "m")
     cmd = captured["cmd"]
     assert "GITHUB_TOKEN" in cmd       # forwarded by name
@@ -425,7 +425,7 @@ def test_server_persists_passthrough_env(kanban, monkeypatch):
     monkeypatch.setattr(ks, "KANBAN_DIR", kanban)
     ks.update_board_meta("demo", {"passthroughEnv": [
         "GITHUB_TOKEN", "DATABASE_URL", "bad-key", "GITHUB_TOKEN"]})
-    meta = json.load(open(os.path.join(kanban, "demo", "_meta.json"),
+    meta = json.load(open(os.path.join(kanban, "boards", "demo", "_meta.json"),
                           encoding="utf-8"))
     assert meta["passthroughEnv"] == ["GITHUB_TOKEN", "DATABASE_URL"]
 
@@ -439,7 +439,7 @@ def test_server_passthrough_env_accepts_newline_string(kanban, monkeypatch):
     monkeypatch.setattr(ks, "KANBAN_DIR", kanban)
     ks.update_board_meta("demo", {
         "passthroughEnv": "GITHUB_TOKEN\nDATABASE_URL\n\nbad-key\n"})
-    meta = json.load(open(os.path.join(kanban, "demo", "_meta.json"),
+    meta = json.load(open(os.path.join(kanban, "boards", "demo", "_meta.json"),
                           encoding="utf-8"))
     assert meta["passthroughEnv"] == ["GITHUB_TOKEN", "DATABASE_URL"]
 
@@ -448,7 +448,7 @@ def test_server_empty_passthrough_env_removes_field(kanban, monkeypatch):
     monkeypatch.setattr(ks, "KANBAN_DIR", kanban)
     ks.update_board_meta("demo", {"passthroughEnv": ["GITHUB_TOKEN"]})
     ks.update_board_meta("demo", {"passthroughEnv": []})
-    meta = json.load(open(os.path.join(kanban, "demo", "_meta.json"),
+    meta = json.load(open(os.path.join(kanban, "boards", "demo", "_meta.json"),
                           encoding="utf-8"))
     assert "passthroughEnv" not in meta
 
@@ -533,7 +533,7 @@ def test_build_docker_image_skips_when_no_per_board(kanban):
 # --- dispatch is blocked (not spawned) when per-board Dockerfile missing -----
 
 def _docker_meta(kanban, use_docker=True):
-    with open(os.path.join(kanban, "demo", "_meta.json"), "w", encoding="utf-8") as f:
+    with open(os.path.join(kanban, "boards", "demo", "_meta.json"), "w", encoding="utf-8") as f:
         json.dump({"project": "Demo", "useDocker": use_docker}, f)
     os.makedirs(os.path.join(kanban, "_orchestrator", "docker"), exist_ok=True)
 
@@ -546,7 +546,7 @@ def test_dispatch_one_blocks_when_dockerfile_missing(kanban, monkeypatch):
                         lambda *a, **k: spawned.append(a) or {})
 
     task = {"id": "1", "title": "x", "detail": "", "status": "ready",
-            "_board": "demo", "_path": os.path.join(kanban, "demo", "1.json")}
+            "_board": "demo", "_path": os.path.join(kanban, "boards", "demo", "1.json")}
     dispatched = orch._dispatch_one(kanban, task,
                                     {"name": "g", "systemPrompt": "p"}, "m")
 
@@ -573,7 +573,7 @@ def test_dispatch_one_spawns_when_dockerfile_present(kanban, monkeypatch):
                                          "sessionId": "s", "cwd": "c",
                                          "logFile": "l"})
     task = {"id": "1", "title": "x", "detail": "", "status": "ready",
-            "_board": "demo", "_path": os.path.join(kanban, "demo", "1.json")}
+            "_board": "demo", "_path": os.path.join(kanban, "boards", "demo", "1.json")}
     dispatched = orch._dispatch_one(kanban, task,
                                     {"name": "g", "systemPrompt": "p"}, "m")
     assert dispatched is True
@@ -585,7 +585,7 @@ def test_dispatch_one_non_docker_spawns(kanban, monkeypatch):
     monkeypatch.setattr(orch, "spawn_agent",
                         lambda *a, **k: {"state": "dispatched", "pid": 1})
     task = {"id": "1", "title": "x", "detail": "", "status": "ready",
-            "_board": "demo", "_path": os.path.join(kanban, "demo", "1.json")}
+            "_board": "demo", "_path": os.path.join(kanban, "boards", "demo", "1.json")}
     assert orch._dispatch_one(kanban, task,
                               {"name": "g", "systemPrompt": "p"}, "m") is True
     assert task["status"] == "in_progress"
@@ -658,7 +658,7 @@ def test_spawn_agent_docker_chat_streams_translated_prompt(kanban, monkeypatch):
 
     monkeypatch.setattr(orch.subprocess, "Popen", fake_popen)
     task = {"id": "1", "title": "x", "detail": "", "_board": "demo",
-            "_path": os.path.join(kanban, "demo", "1.json")}
+            "_path": os.path.join(kanban, "boards", "demo", "1.json")}
     orch.spawn_agent(kanban, "demo", task, {"name": "g", "systemPrompt": "p"}, "m")
 
     cmd = captured["cmd"]
@@ -711,7 +711,7 @@ def test_spawn_agent_docker_chat_disabled_keeps_legacy_inner_cmd(kanban, monkeyp
 
     monkeypatch.setattr(orch.subprocess, "Popen", fake_popen)
     task = {"id": "1", "title": "x", "detail": "", "_board": "demo",
-            "_path": os.path.join(kanban, "demo", "1.json")}
+            "_path": os.path.join(kanban, "boards", "demo", "1.json")}
     orch.spawn_agent(kanban, "demo", task, {"name": "g", "systemPrompt": "p"}, "m")
 
     cmd = captured["cmd"]

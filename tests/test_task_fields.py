@@ -27,21 +27,21 @@ def board(kanban, monkeypatch):
 
 
 def test_update_title(board):
-    p = os.path.join(board, "demo", "1.json")
+    p = os.path.join(board, "boards", "demo", "1.json")
     result, status = ks.update_task_fields("demo", "1", "New Title", None)
     assert status == 200
     assert _read(p)["title"] == "New Title"
 
 
 def test_update_detail(board):
-    p = os.path.join(board, "demo", "1.json")
+    p = os.path.join(board, "boards", "demo", "1.json")
     result, status = ks.update_task_fields("demo", "1", None, "A new description")
     assert status == 200
     assert _read(p)["detail"] == "A new description"
 
 
 def test_update_both(board):
-    p = os.path.join(board, "demo", "1.json")
+    p = os.path.join(board, "boards", "demo", "1.json")
     result, status = ks.update_task_fields("demo", "1", "My Title", "My Detail")
     assert status == 200
     t = _read(p)
@@ -50,7 +50,7 @@ def test_update_both(board):
 
 
 def test_clear_detail(board):
-    p = os.path.join(board, "demo", "1.json")
+    p = os.path.join(board, "boards", "demo", "1.json")
     ks.update_task_fields("demo", "1", None, "Some detail")
     result, status = ks.update_task_fields("demo", "1", None, "")
     assert status == 200
@@ -58,7 +58,7 @@ def test_clear_detail(board):
 
 
 def test_empty_title_rejected(board):
-    p = os.path.join(board, "demo", "1.json")
+    p = os.path.join(board, "boards", "demo", "1.json")
     orig_title = _read(p)["title"]
     result, status = ks.update_task_fields("demo", "1", "   ", None)
     assert status == 400
@@ -66,7 +66,7 @@ def test_empty_title_rejected(board):
 
 
 def test_title_stripped(board):
-    p = os.path.join(board, "demo", "1.json")
+    p = os.path.join(board, "boards", "demo", "1.json")
     result, status = ks.update_task_fields("demo", "1", "  Spaced Title  ", None)
     assert status == 200
     assert _read(p)["title"] == "Spaced Title"
@@ -84,7 +84,7 @@ def test_task_not_found(board):
 
 def test_write_succeeds_alongside_concurrent_disk_activity(board):
     """update_task_fields succeeds even when write_ticket is called concurrently."""
-    p = os.path.join(board, "demo", "1.json")
+    p = os.path.join(board, "boards", "demo", "1.json")
     orig_write = ks.write_ticket
 
     def injecting_write(path, task):

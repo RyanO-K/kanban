@@ -92,7 +92,7 @@ def test_commit_cwd_for_task_uses_directory_when_no_worktree(kanban, tmp_path):
 
 def test_commit_cwd_for_task_falls_back_to_discovery(kanban, monkeypatch):
     # No directory + no worktree → legacy discover/repo_dir_for_paths pipeline.
-    monkeypatch.setattr(orch, "discover_changed_paths", lambda kd: [".kanban/demo/1.json"])
+    monkeypatch.setattr(orch, "discover_changed_paths", lambda kd: [".kanban/boards/demo/1.json"])
     task = {"id": "1", "_board": "demo"}
     assert orch.commit_cwd_for_task(kanban, task, {}) == os.path.abspath(kanban)
 
@@ -187,7 +187,7 @@ def test_publish_output_branch_non_worktree_still_cuts_branch(kanban, monkeypatc
 def test_finish_completion_worktree_publishes_branch(kanban, tmp_path, monkeypatch):
     proj = tmp_path / "repo"
     (proj / ".claude" / "worktrees" / "ticket-1").mkdir(parents=True)
-    meta_path = os.path.join(kanban, "demo", "_meta.json")
+    meta_path = os.path.join(kanban, "boards", "demo", "_meta.json")
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump({"project": "Demo", "useWorktrees": True, "directory": str(proj)}, f)
 

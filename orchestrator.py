@@ -42,7 +42,12 @@ _SERVER_OPS = {}
 
 def load_all_tasks(kanban_dir):
     tasks = []
-    for entry in sorted(os.scandir(kanban_dir), key=lambda e: e.name):
+    boards_dir = oc.boards_root(kanban_dir)
+    try:
+        entries = sorted(os.scandir(boards_dir), key=lambda e: e.name)
+    except FileNotFoundError:
+        entries = []
+    for entry in entries:
         if not entry.is_dir() or entry.name in SKIP_DIRS:
             continue
         if not os.path.isfile(os.path.join(entry.path, META_FILE)):
