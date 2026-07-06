@@ -154,6 +154,7 @@
             <input type="checkbox" id="bUseDocker"> Run agents in a Docker container
           </label>
           <div style="font-size:11px;color:var(--text-muted);margin:-6px 0 14px;">When on, the orchestrator builds a per-repo Docker image and runs the dispatched agent <em>inside</em> a container (workspace mounted at <code>/workspace</code>). Requires Docker on the host and <code>ANTHROPIC_API_KEY</code> in the orchestrator's environment. Persisted as <code>useDocker</code> on _meta.json.</div>
+          <div id="bContainerSettings" style="display:none;">
           <label class="form-label">Container environment variables
             <textarea id="bEnvVars" class="form-input form-textarea" rows="4" spellcheck="false"
               placeholder="One KEY=VALUE per line, e.g.&#10;NODE_ENV=development&#10;DATABASE_URL=postgres://..."></textarea>
@@ -164,6 +165,7 @@
               placeholder="Env-var NAMES only, e.g.&#10;GITHUB_TOKEN&#10;DATABASE_URL&#10;RENDER_API_KEY"></textarea>
           </label>
           <div style="font-size:11px;color:var(--text-muted);margin:-6px 0 14px;"><strong>Names only</strong> — the <em>value</em> of each is read from the orchestrator's own environment at dispatch and forwarded with <code>docker run -e NAME</code>. Nothing is ever written to <code>_meta.json</code>, the env-file, or the image. Use this for secrets (GitHub push token, <code>DATABASE_URL</code>, <code>RENDER_API_KEY</code>, Discord token); a listed name absent from the orchestrator env is skipped with a warning in the run log. Anthropic credentials are always forwarded automatically. Stored as <code>passthroughEnv</code> on _meta.json.</div>
+          </div>
         </div>
       </div>
       <div class="form-actions">

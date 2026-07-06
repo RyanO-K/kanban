@@ -1426,12 +1426,14 @@ function openBoardModal(){
   $("bCommitReq").value=d.commitRequirements||"";
   $("bUseWorktrees").checked=d.useWorktrees===true;
   $("bUseDocker").checked=d.useDocker===true;
+  $("bContainerSettings").style.display=d.useDocker===true?"":"none";
   $("bEnvVars").value=envMapToText(d.envVars);
   $("bPassthroughEnv").value=namesToText(d.passthroughEnv);
   $("boardModal").classList.add("open");
   setTimeout(()=>$("bProject").focus(),50);
 }
 function closeBoardModal(){$("boardModal").classList.remove("open");}
+$("bUseDocker").addEventListener("change",()=>{$("bContainerSettings").style.display=$("bUseDocker").checked?"":"none";});
 $("boardSettingsBtn").addEventListener("click",openBoardModal);
 $("boardModalClose").addEventListener("click",closeBoardModal);
 $("boardCancelBtn").addEventListener("click",closeBoardModal);
