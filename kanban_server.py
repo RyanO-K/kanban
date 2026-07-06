@@ -840,6 +840,43 @@ def update_task_model(slug, task_id, model):
     return {"ok": True, "taskId": task_id, "model": model}, 200
 
 
+def update_task_fields(slug, task_id, title, detail):
+    """Update a ticket's title and/or detail text. Either may be None to leave unchanged.
+    Follows the re-read-before-write pattern so concurrent writes aren't clobbered."""
+    path, _ = board_dir(slug)
+    if path is None or not is_board(path):
+        return {"error": "board not found"}, 404
+
+    tp = ticket_path(path, task_id)
+    if tp is None or not os.path.isfile(tp):
+        return {"error": f"task {task_id} not found"}, 404
+
+    if title is not None and not title.strip():
+        return {"error": "title cannot be empty"}, 400
+
+    try:
+        with open(tp, "r", encoding="utf-8") as f:
+            task = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        return {"error": str(e)}, 500
+
+    if title is not None:
+        task["title"] = title.strip()
+    if detail is not None:
+        if detail.strip():
+            task["detail"] = detail.strip()
+        else:
+            task.pop("detail", None)
+
+    try:
+        write_ticket(tp, task)
+    except OSError as e:
+        return {"error": str(e)}, 500
+    touch_meta(path)
+
+    return {"ok": True, "taskId": task_id}, 200
+
+
 def create_task(slug, payload):
     path, _ = board_dir(slug)
     if path is None or not is_board(path):
@@ -1564,6 +1601,12 @@ class KanbanHandler(BaseHTTPRequestHandler):
                 result, status = update_task_model(slug, task_id, payload.get("model", ""))
             elif "order" in payload:
                 result, status = update_task_order(slug, task_id, payload.get("order"))
+            elif "title" in payload or "detail" in payload:
+                result, status = update_task_fields(
+                    slug, task_id,
+                    payload.get("title"),
+                    payload.get("detail"),
+                )
             else:
                 result, status = update_task_status(slug, task_id, payload.get("column", ""))
             self._json(result, status)

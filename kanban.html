@@ -56,7 +56,10 @@
 <div class="side-panel" id="sidePanel">
   <div class="sp-header">
     <h2 id="spTitle">Task</h2>
-    <button class="sp-close" id="spClose">&times;</button>
+    <div style="display:flex;align-items:center;gap:4px;">
+      <button class="sp-copy-btn" id="spTitleEditBtn" title="Edit title" style="padding:3px 7px;">&#x270E;</button>
+      <button class="sp-close" id="spClose">&times;</button>
+    </div>
   </div>
   <div class="sp-body" id="spBody"></div>
   <!-- Docked Create Task form lives here when the modal is "docked to sidebar" -->

@@ -349,6 +349,10 @@ async function updateTaskModel(file,taskId,model){
   try{await apiFetch("/api/board/"+encodeURIComponent(file)+"/task/"+encodeURIComponent(taskId),{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({model})});lastMtime=0;showToast("Task #"+taskId+" model → "+(model||"default"));}
   catch(e){showToast("Failed to set model for #"+taskId,true);}
 }
+async function updateTaskFields(file,taskId,fields){
+  try{await apiFetch("/api/board/"+encodeURIComponent(file)+"/task/"+encodeURIComponent(taskId),{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(fields)});lastMtime=0;poll();}
+  catch(e){showToast("Failed to save changes",true);throw e;}
+}
 async function deleteTask(file,taskId,title){
   if(!confirm("Delete task #"+taskId+": "+title+"?"))return;
   try{await apiFetch("/api/board/"+encodeURIComponent(file)+"/task/"+encodeURIComponent(taskId),{method:"DELETE"});lastMtime=0;closePanel();showToast("Deleted #"+taskId);poll();}
@@ -606,6 +610,82 @@ function bindLogToggle(task,srcFile){
   if(logPoll.openKey===key)open();
 }
 
+function startTitleEdit(task,srcFile){
+  const titleEl=$("spTitle");
+  if(titleEl.querySelector("input"))return; // already editing
+  const current=task.title;
+  const inp=document.createElement("input");
+  inp.type="text";inp.value=current;inp.className="sp-title-input";
+  inp.setAttribute("aria-label","Edit ticket title");
+  const save=async()=>{
+    const val=inp.value.trim();
+    if(!val){showToast("Title cannot be empty",true);inp.focus();return;}
+    if(val===current){restore();return;}
+    try{
+      await updateTaskFields(srcFile,String(task.id),{title:val});
+      task.title=val;
+      restore();
+    }catch(e){inp.focus();}
+  };
+  const restore=()=>{titleEl.textContent="#"+task.id+" "+task.title;};
+  titleEl.textContent="";
+  titleEl.appendChild(inp);
+  inp.focus();inp.select();
+  inp.addEventListener("keydown",e=>{
+    if(e.key==="Enter"){e.preventDefault();save();}
+    else if(e.key==="Escape"){restore();}
+  });
+  inp.addEventListener("blur",save);
+}
+
+function startDetailEdit(task,srcFile){
+  const view=$("spDetailView");
+  const field=$("spDetailField");
+  if(!view||!field)return;
+  if(field.querySelector("textarea"))return; // already editing
+  const current=task.detail||"";
+  const ta=document.createElement("textarea");
+  ta.className="form-input form-textarea sp-detail-edit";
+  ta.value=current;ta.rows=5;
+  ta.setAttribute("aria-label","Edit description");
+  const btnRow=document.createElement("div");
+  btnRow.className="sp-detail-edit-actions";
+  const saveBtn=document.createElement("button");saveBtn.type="button";saveBtn.className="btn btn-create";saveBtn.style.fontSize="12px";saveBtn.style.padding="4px 12px";saveBtn.textContent="Save";
+  const cancelBtn=document.createElement("button");cancelBtn.type="button";cancelBtn.className="btn btn-cancel";cancelBtn.style.fontSize="12px";cancelBtn.style.padding="4px 12px";cancelBtn.textContent="Cancel";
+  btnRow.appendChild(saveBtn);btnRow.appendChild(cancelBtn);
+  const restore=()=>{
+    ta.remove();btnRow.remove();
+    view.style.display="";
+    const editBtn=field.querySelector(".sp-edit-detail-btn");
+    if(editBtn)editBtn.style.display="";
+  };
+  const save=async()=>{
+    const val=ta.value.trim();
+    if(val===current){restore();return;}
+    saveBtn.disabled=true;cancelBtn.disabled=true;
+    try{
+      await updateTaskFields(srcFile,String(task.id),{detail:val});
+      task.detail=val||undefined;
+      // Update the view text in place
+      if(val){view.textContent=val;view.className="sp-detail";view.style.cssText="";}
+      else{view.textContent="No description";view.className="sp-detail sp-detail-empty";view.style.color="var(--text-muted)";view.style.fontStyle="italic";}
+      restore();
+    }catch(e){saveBtn.disabled=false;cancelBtn.disabled=false;}
+  };
+  view.style.display="none";
+  const editBtn=field.querySelector(".sp-edit-detail-btn");
+  if(editBtn)editBtn.style.display="none";
+  view.parentNode.insertBefore(ta,view.nextSibling);
+  view.parentNode.insertBefore(btnRow,ta.nextSibling);
+  ta.focus();
+  saveBtn.addEventListener("click",save);
+  cancelBtn.addEventListener("click",restore);
+  ta.addEventListener("keydown",e=>{
+    if(e.key==="Escape"){restore();}
+    if(e.key==="Enter"&&(e.ctrlKey||e.metaKey)){save();}
+  });
+}
+
 function renderPanel(task){
   stopLogPoll(); // clear any prior poll; bindLogToggle re-arms it if still open
   hideToolResult(); // a bubble portaled to <body> must not outlive its chip
@@ -623,7 +703,7 @@ function renderPanel(task){
   if(task.createdAt) html+='<div class="sp-field"><div class="sp-field-label">Created</div><div class="sp-field-value">'+esc(new Date(task.createdAt).toLocaleString())+'</div></div>';
   if(task._filePath) html+='<div class="sp-field"><div class="sp-field-label">File Path</div><div class="sp-field-value sp-session-row"><button type="button" class="sp-copy-btn" id="spCopyPath" title="Copy ticket file path to clipboard">📋 Copy path</button></div></div>';
   if(task.claudeSessionId) html+='<div class="sp-field"><div class="sp-field-label">Claude Session</div><div class="sp-field-value sp-session-row"><code class="sp-session-id">'+esc(task.claudeSessionId)+'</code><button type="button" class="sp-copy-btn" id="spCopySession" title="Copy resume command">Copy resume cmd</button></div></div>';
-  if(task.detail) html+='<div class="sp-field"><div class="sp-field-label">Description</div><div class="sp-detail">'+esc(task.detail)+'</div></div>';
+  html+='<div class="sp-field" id="spDetailField"><div class="sp-field-label">Description <button type="button" class="sp-copy-btn sp-edit-detail-btn" id="spEditDetailBtn" title="Edit description" style="padding:2px 6px;margin-left:4px;">&#x270E;</button></div>'+(task.detail?'<div class="sp-detail" id="spDetailView">'+esc(task.detail)+'</div>':'<div class="sp-detail sp-detail-empty" id="spDetailView" style="color:var(--text-muted);font-style:italic;">No description</div>')+'</div>';
 
   const deps=task.dependsOn?(Array.isArray(task.dependsOn)?task.dependsOn:[task.dependsOn]):[];
   if(deps.length||task.optional){
@@ -726,6 +806,14 @@ function renderPanel(task){
       .catch(()=>showToast("Copy failed",true));
   });
   bindLogToggle(task,srcFile);
+
+  // Title edit button
+  const titleEditBtn=$("spTitleEditBtn");
+  if(titleEditBtn) titleEditBtn.addEventListener("click",()=>startTitleEdit(task,srcFile));
+
+  // Description inline edit
+  const editDetailBtn=$("spEditDetailBtn");
+  if(editDetailBtn) editDetailBtn.addEventListener("click",()=>startDetailEdit(task,srcFile));
 
   // Spec rows: toggle inline preview; fetch + render markdown on first open.
   // The "Open ↗" link is a normal anchor (new tab) — stop it bubbling so the
