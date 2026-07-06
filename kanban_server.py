@@ -663,6 +663,12 @@ def update_board_meta(slug, payload):
         else:
             meta[key] = value
 
+    # When Docker is explicitly turned off, container-only fields are meaningless
+    # — remove them so no stale config sits around on a non-Docker board (ticket #87).
+    if "useDocker" in payload and not _oc.use_docker(meta):
+        meta.pop("envVars", None)
+        meta.pop("passthroughEnv", None)
+
     # `description` is a flat alias for context.description — merge it into the
     # existing `context` object rather than overwriting its other structured keys.
     if "description" in payload:
