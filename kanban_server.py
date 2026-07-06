@@ -1324,13 +1324,48 @@ def orch_chat(board, task_id, payload):
 
 # --- Performance monitor ----------------------------------------------------
 
+def _ticket_agent_pids():
+    """Scan all board ticket files for in_progress orchestrator PIDs.
+
+    After a server reboot _PROCS is empty, so this recovers the PIDs that were
+    dispatched before the restart.  Only in_progress / blocked tickets are
+    included — completed tickets' PIDs may have been reused by the OS.
+    """
+    pids = set()
+    try:
+        for entry in os.scandir(KANBAN_DIR):
+            if not entry.is_dir() or not is_board(entry.path):
+                continue
+            for tfile in os.scandir(entry.path):
+                if not tfile.is_file() or not tfile.name.endswith(".json") or tfile.name == META_FILE:
+                    continue
+                try:
+                    with open(tfile.path, "r", encoding="utf-8") as f:
+                        t = json.load(f)
+                except Exception:
+                    continue
+                if t.get("status") not in ("in_progress", "blocked"):
+                    continue
+                orch = t.get("orchestrator") or {}
+                pid = orch.get("pid")
+                if isinstance(pid, int):
+                    pids.add(pid)
+    except Exception:
+        pass
+    return pids
+
+
 def _owned_pids():
-    """PIDs the orchestrator owns: ticket agents (_PROCS) + server background ops (_SERVER_OPS)."""
+    """PIDs the orchestrator owns: ticket agents (_PROCS) + server background ops (_SERVER_OPS).
+
+    Also recovers in_progress ticket PIDs from disk so sessions spawned before a
+    server reboot are not shown as external in the Performance tab.
+    """
     try:
         import orchestrator as _orch
-        return set(_orch._PROCS.keys()) | set(_orch._SERVER_OPS.keys())
+        return set(_orch._PROCS.keys()) | set(_orch._SERVER_OPS.keys()) | _ticket_agent_pids()
     except Exception:
-        return set()
+        return _ticket_agent_pids()
 
 
 def _server_op_labels():
