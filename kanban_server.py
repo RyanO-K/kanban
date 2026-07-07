@@ -763,6 +763,15 @@ def update_task_status(slug, task_id, new_column):
     if old_status == "in_progress" and new_status != "in_progress":
         _ui_kill_session(KANBAN_DIR, slug, task)
 
+    # Ticket #97: moving OUT of blocked clears orchestrator.question so the
+    # notification bell stops showing this ticket as needing human attention.
+    # If the ticket re-blocks later, the agent writes a fresh question which
+    # naturally re-triggers the bell.
+    if old_status == "blocked" and new_status != "blocked":
+        orch = task.get("orchestrator")
+        if isinstance(orch, dict) and "question" in orch:
+            del orch["question"]
+
     task["status"] = new_status
     task.setdefault("history", []).append(entry)
 
