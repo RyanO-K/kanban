@@ -4,9 +4,11 @@ import sys
 
 import pytest
 
-# Make the .kanban dir importable (orchestrator_core.py lives there).
-KANBAN_SRC = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, KANBAN_SRC)
+# Make the app modules (app/kanban_server.py, app/orchestrator*.py, ...) and the
+# one-shot scripts (scripts/migrate_boards_folder.py) importable by bare name.
+KANBAN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(KANBAN_ROOT, "scripts"))
+sys.path.insert(0, os.path.join(KANBAN_ROOT, "app"))
 
 
 @pytest.fixture

@@ -113,10 +113,8 @@ def test_nudge_returns_queued_true_when_no_thread(server, monkeypatch):
 
 def test_nudge_button_on_boards_page():
     """The nudge button should appear in the topbar on the boards page."""
-    import pathlib
-    root = pathlib.Path(__file__).parent.parent
-    html_path = root / "kanban.html"
-    js_path = root / "kanban.js"
+    html_path = ks.HTML_PATH
+    js_path = ks.JS_PATH
     with open(html_path, "r", encoding="utf-8") as f:
         html = f.read()
     with open(js_path, "r", encoding="utf-8") as f:
@@ -139,9 +137,7 @@ def test_nudge_button_on_boards_page():
 
 def test_nudge_button_calls_api():
     """The nudge button handler should POST to /api/orchestrator/nudge."""
-    import pathlib
-    js_path = pathlib.Path(__file__).parent.parent / "kanban.js"
-    with open(js_path, "r", encoding="utf-8") as f:
+    with open(ks.JS_PATH, "r", encoding="utf-8") as f:
         js = f.read()
 
     # Extract the nudgeBoardBtn click handler to verify it calls the right endpoint.

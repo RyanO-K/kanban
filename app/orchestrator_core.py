@@ -10,7 +10,8 @@ import os
 import re
 from datetime import datetime, timezone
 
-KANBAN_DIR = os.path.dirname(os.path.abspath(__file__))
+# This module lives in .kanban/app/, so the board root is its parent dir.
+KANBAN_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ORCH_DIR = os.path.join(KANBAN_DIR, "_orchestrator")
 CONFIG_DIR = os.path.join(KANBAN_DIR, "config")
 

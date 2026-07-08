@@ -14,7 +14,7 @@ DEPLOY ORDER (important — do NOT run this against a live old-code orchestrator
   1. Stop the orchestrator + server (they scan the old flat layout and would lose
      every board the instant it moves).
   2. Deploy the ticket #94 code (merge to release).
-  3. Run this script once:  python .kanban/migrate_boards_folder.py
+  3. Run this script once:  python .kanban/scripts/migrate_boards_folder.py
   4. Restart the orchestrator + server.
 
 Idempotent: a board already under `boards/` is skipped; re-running is a no-op.
@@ -25,8 +25,8 @@ import os
 import shutil
 import sys
 
-# This script lives directly inside .kanban/, so the board root is its own dir.
-KANBAN_DIR = os.path.dirname(os.path.abspath(__file__))
+# This script lives in .kanban/scripts/, so the board root is its parent dir.
+KANBAN_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BOARDS_SUBDIR = "boards"
 META_FILE = "_meta.json"
 

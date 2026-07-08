@@ -21,7 +21,7 @@ A lightweight, file-based kanban system for managing development tickets. Perfec
 Start the kanban server and web UI:
 
 ```bash
-python kanban_server.py
+python app/kanban_server.py
 ```
 
 The UI will be available at `http://localhost:8745`
@@ -31,7 +31,7 @@ The UI will be available at `http://localhost:8745`
 For autonomous agent-based ticket dispatch (requires the Claude Code environment):
 
 ```bash
-python orchestrator.py
+python app/orchestrator.py
 ```
 
 The orchestrator automatically picks up tickets marked `ready` and dispatches headless agents to work them.
@@ -49,12 +49,16 @@ The orchestrator automatically picks up tickets marked `ready` and dispatches he
 
 ```
 .kanban/
-├── kanban_server.py      # Web server and API
-├── orchestrator.py        # Autonomous agent dispatcher
-├── kanban.html            # Web UI (served at /)
+├── app/                   # The application
+│   ├── kanban_server.py   #   Web server and API
+│   ├── orchestrator.py    #   Autonomous agent dispatcher (runtime)
+│   ├── orchestrator_core.py  # Dispatcher decision logic (unit-tested)
+│   └── perf_monitor.py    #   Process/CPU monitor for the Performance tab
+├── scripts/               # One-shot maintenance scripts
+├── static/                # Web UI assets (kanban.html/css/js, served at /)
 ├── requirements.txt       # Python dependencies
 ├── README.md              # This file
-├── <board-name>/
+├── boards/<board-name>/
 │   ├── _meta.json         # Board settings and context
 │   └── *.json             # Ticket files (numbered: 1.json, 2.json, ...)
 ├── config/                # Agent profiles and dispatcher configuration
@@ -75,7 +79,7 @@ See `CLAUDE.md` for the complete ticket schema and agent interaction guide.
 
 If you're using this kanban with Claude Code agents:
 
-1. Start the orchestrator: `python orchestrator.py`
+1. Start the orchestrator: `python app/orchestrator.py`
 2. Create a board in the UI (or add a directory with `_meta.json`)
 3. Enable the orchestrator in the UI's **Orchestrator** tab
 4. Agents will automatically pick up `ready` tickets and move them to `in_progress`
@@ -141,7 +145,7 @@ python -m pytest tests/test_orchestrator_core.py
 
 **Port already in use?**
 ```bash
-python kanban_server.py 9000  # Use a different port
+python app/kanban_server.py 9000  # Use a different port
 ```
 
 **Performance tab shows "Install psutil"?**
@@ -159,7 +163,6 @@ pip install psutil  # Optional dependency for better monitoring
 
 - `CLAUDE.md` — Complete guide to the board structure, agent conventions, and git workflows
 - `orchestrator_triage_prompt.md` — How the orchestrator prioritizes and selects tickets
-- `_meta.template.json` — Template for creating new boards
 
 ## Contributing
 

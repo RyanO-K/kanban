@@ -142,15 +142,13 @@ import re
 
 
 def _read_kanban_html():
-    """Read kanban.html from the same directory as kanban_server.py."""
-    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return open(os.path.join(here, "kanban.html"), encoding="utf-8").read()
+    """Read kanban.html from the path the server actually serves."""
+    return open(ks.HTML_PATH, encoding="utf-8").read()
 
 
 def _read_kanban_js():
-    """Read kanban.js from the same directory as kanban_server.py."""
-    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return open(os.path.join(here, "kanban.js"), encoding="utf-8").read()
+    """Read kanban.js from the path the server actually serves."""
+    return open(ks.JS_PATH, encoding="utf-8").read()
 
 
 def test_fmodel_select_has_no_hardcoded_claude_options():

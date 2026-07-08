@@ -9,10 +9,17 @@ just read and edit the JSON files directly** — no server needed.
 
 ```
 .kanban/
-  kanban_server.py        # optional read/write API + UI server (port 8745)
-  kanban.html             # the board UI (served at /)
-  _meta.template.json     # template for a new board's _meta.json
-  migrate_boards_folder.py  # one-shot: relocate loose root boards into boards/ (ticket #94)
+  app/                    # the application (all long-running Python lives here)
+    kanban_server.py      # optional read/write API + UI server (port 8745)
+    orchestrator.py       # autonomous dispatcher runtime (tick loop, real processes)
+    orchestrator_core.py  # dispatcher decision logic (pure, unit-tested)
+    perf_monitor.py       # process/CPU roll-up for the Performance tab
+  scripts/                # one-shot maintenance scripts
+    migrate_boards_folder.py  # relocate loose root boards into boards/ (ticket #94)
+    backfill_kanban_guide.py  # stamp _kanbanGuide onto pre-existing tickets
+  static/                 # web UI assets, served by the server
+    kanban.html           # the board UI (served at /)
+    kanban.css, kanban.js
   boards/                 # dedicated, gitignored folder holding every board (ticket #94)
     <board-slug>/         # one directory per board (slug = its id)
       _meta.json          # board metadata: project, updated, context, openQuestions, outOfScope
@@ -45,7 +52,7 @@ Key fields on a `<id>.json` ticket:
 `<id>.json`, and edit JSON in place. When changing `status`, append a `status_change`
 entry to `history` with a UTC timestamp. To add a new ticket, create `<next-id>.json`.
 
-**Via the server (optional):** `python .kanban/kanban_server.py` then use the API:
+**Via the server (optional):** `python .kanban/app/kanban_server.py` then use the API:
 
 | Action | Request |
 |---|---|
@@ -72,7 +79,7 @@ Both keys are optional and fall back per-field; a missing or malformed file is
 ignored. Precedence, most explicit first:
 
 - **host:** `KANBAN_HOST` env var → `server.json` → loopback default
-- **port:** `argv[1]` (`python kanban_server.py 9000`) → `KANBAN_PORT` env var →
+- **port:** `argv[1]` (`python app/kanban_server.py 9000`) → `KANBAN_PORT` env var →
   `server.json` → default
 
 Bind to loopback unless you deliberately need LAN exposure — the API exposes
@@ -221,7 +228,7 @@ tickets and dispatches headless `claude -p` sub-agents up to the concurrency cap
 logic lives in `orchestrator_core.py` (unit-tested); `orchestrator.py` is the runtime that
 spawns real processes.
 
-Run it: `python .kanban/orchestrator.py` (alongside `kanban_server.py`). You can also open a
+Run it: `python .kanban/app/orchestrator.py` (alongside `kanban_server.py`). You can also open a
 normal `claude` CLI in this workspace to talk to it — it reads the same files and the same
 triage prompt (`orchestrator_triage_prompt.md`).
 

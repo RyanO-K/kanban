@@ -601,10 +601,9 @@ def test_dispatch_one_non_docker_spawns(kanban, monkeypatch):
 # container only needs to make local commits.
 
 def _dockerfile_template_text():
-    # orchestrator_core.py lives at the repo root; the template sits beside it
-    # under _orchestrator/docker/Dockerfile.
-    root = os.path.dirname(os.path.abspath(oc.__file__))
-    path = os.path.join(root, "_orchestrator", "docker", "Dockerfile")
+    # The template ships in the real tree under _orchestrator/docker/Dockerfile,
+    # resolved from the same root constant the orchestrator itself uses.
+    path = os.path.join(oc.KANBAN_DIR, "_orchestrator", "docker", "Dockerfile")
     with open(path, encoding="utf-8") as f:
         return f.read()
 

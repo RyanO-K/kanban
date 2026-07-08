@@ -77,11 +77,12 @@ def allowed_origin(origin):
     return None
 
 
-# This script lives directly inside .kanban/, so the board root is its own dir.
-KANBAN_DIR = os.path.dirname(os.path.abspath(__file__))
-HTML_PATH = os.path.join(KANBAN_DIR, "kanban.html")
-CSS_PATH = os.path.join(KANBAN_DIR, "kanban.css")
-JS_PATH = os.path.join(KANBAN_DIR, "kanban.js")
+# This module lives in .kanban/app/, so the board root is its parent dir.
+KANBAN_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+STATIC_DIR = os.path.join(KANBAN_DIR, "static")
+HTML_PATH = os.path.join(STATIC_DIR, "kanban.html")
+CSS_PATH = os.path.join(STATIC_DIR, "kanban.css")
+JS_PATH = os.path.join(STATIC_DIR, "kanban.js")
 META_FILE = "_meta.json"
 # Board directories live under a dedicated `boards/` folder (ticket #94), which
 # is gitignored — keeping the .kanban root clean of loose board dirs mixed in
