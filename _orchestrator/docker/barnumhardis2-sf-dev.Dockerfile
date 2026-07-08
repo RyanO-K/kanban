@@ -29,7 +29,23 @@
 #
 # Credentials are NOT baked in — ANTHROPIC_API_KEY (and any passthroughEnv
 # names) forward via `docker run -e NAME`; non-secret board config arrives via
-# `--env-file`. SF org auth (SFDX_AUTH_URL or JWT key) must be in passthroughEnv.
+# `--env-file`.
+#
+# SF org auth — SFDX_AUTH_URL passthrough
+# ----------------------------------------
+# The board's passthroughEnv carries per-org SFDX_AUTH_URL_* variables. Before
+# running sf commands the agent must log in:
+#
+#   sf org login sfdx-url --sfdx-url-value "$SFDX_AUTH_URL_WORKBOX2" \
+#       --alias Workbox2 --set-default
+#
+# To get the auth URL for each org on the host:
+#   sf org display --verbose -o Workbox2 --json | jq -r '.result.sfdxAuthUrl'
+# Store the output as SFDX_AUTH_URL_WORKBOX2 in the orchestrator's environment
+# (e.g. in the shell that starts orchestrator.py, or in a .env file you source
+# before launching it). The orchestrator forwards the value into every container
+# via `docker run -e SFDX_AUTH_URL_WORKBOX2` — the value is never written to disk
+# inside the container or the image.
 FROM node:22-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
