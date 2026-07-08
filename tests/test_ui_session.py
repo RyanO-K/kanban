@@ -278,6 +278,8 @@ def test_drag_out_of_in_progress_no_marker_is_noop(server, kanban, monkeypatch):
     with open(p, "r", encoding="utf-8") as f:
         t = json.load(f)
     t["status"] = "in_progress"
+    # Ticket #100: ensure ticket has a model set so it can move to ready
+    t["model"] = "claude-opus-4-8"
     # No orchestrator marker.
     with open(p, "w", encoding="utf-8") as f:
         json.dump(t, f)

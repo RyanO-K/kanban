@@ -194,3 +194,90 @@ def test_load_model_options_populates_fmodel_select():
         "loadModelOptions() does not populate the fModel select element; "
         "add DOM update logic to keep the Create Task modal in sync"
     )
+
+
+# --- Ticket #100: prevent moving to ready without a real model ---
+
+
+def test_update_status_ready_requires_real_model(board, monkeypatch):
+    """Moving to 'ready' must fail if the model field is empty (displays as '(default)').
+
+    Ticket #100: prevent confusion where tickets without explicit models get stuck
+    in an ambiguous "(default)" state. The ready column should only contain tickets
+    that can actually dispatch with a defined model.
+    """
+    import os
+    monkeypatch.setattr(ks, "KANBAN_DIR", board)
+    # Modify the existing demo ticket 1 to have no model
+    p = os.path.join(board, "boards", "demo", "1.json")
+    with open(p, "r", encoding="utf-8") as f:
+        task = json.load(f)
+    task.pop("model", None)
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(task, f)
+
+    # Try to move it to ready — should fail
+    result, status = ks.update_task_status("demo", "1", "ready")
+    assert status == 400
+    assert "model" in result.get("error", "").lower()
+
+
+def test_update_status_ready_succeeds_with_real_model(board, monkeypatch):
+    """Moving to 'ready' succeeds if the model field is set to a real model."""
+    import os
+    monkeypatch.setattr(ks, "KANBAN_DIR", board)
+    # Set the existing demo ticket 1 to have a real model
+    p = os.path.join(board, "boards", "demo", "1.json")
+    with open(p, "r", encoding="utf-8") as f:
+        task = json.load(f)
+    task["model"] = "claude-opus-4-8"
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(task, f)
+
+    # Move it to ready — should succeed
+    result, status = ks.update_task_status("demo", "1", "ready")
+    assert status == 200
+    assert result["newStatus"] == "ready"
+
+
+def test_update_status_ready_with_whitespace_only_model_fails(board, monkeypatch):
+    """Moving to 'ready' fails if the model field contains only whitespace."""
+    import os
+    monkeypatch.setattr(ks, "KANBAN_DIR", board)
+    # Set the existing demo ticket 1 to have only whitespace for model
+    p = os.path.join(board, "boards", "demo", "1.json")
+    with open(p, "r", encoding="utf-8") as f:
+        task = json.load(f)
+    task["model"] = "   "
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(task, f)
+
+    # Try to move it to ready — should fail
+    result, status = ks.update_task_status("demo", "1", "ready")
+    assert status == 400
+    assert "model" in result.get("error", "").lower()
+
+
+def test_moving_to_other_columns_ignores_model(board, monkeypatch):
+    """Moving to columns other than 'ready' should succeed regardless of model."""
+    import os
+    monkeypatch.setattr(ks, "KANBAN_DIR", board)
+    # Set the existing demo ticket 1 to have no model
+    p = os.path.join(board, "boards", "demo", "1.json")
+    with open(p, "r", encoding="utf-8") as f:
+        task = json.load(f)
+    task.pop("model", None)
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(task, f)
+
+    # Move to todo — should succeed (model check only for ready)
+    result, status = ks.update_task_status("demo", "1", "todo")
+    assert status == 200
+
+    # Move to blocked — should succeed (model check only for ready)
+    result, status = ks.update_task_status("demo", "1", "blocked")
+    assert status == 200
+
+    # Move to done — should succeed (model check only for ready)
+    result, status = ks.update_task_status("demo", "1", "done")
+    assert status == 200

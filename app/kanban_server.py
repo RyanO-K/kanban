@@ -752,6 +752,13 @@ def update_task_status(slug, task_id, new_column):
 
     old_status = task.get("status", "todo")
     new_status = COLUMN_STATUS[new_column]
+
+    # Ticket #100: prevent moving to "ready" without a real model specified.
+    # An empty model field displays as "(default)" in the UI, which is confusing
+    # and should not be allowed to dispatch.
+    if new_status == "ready" and not (task.get("model") or "").strip():
+        return {"error": "cannot move to ready: no model specified (model cannot be '(default)')"}, 400
+
     entry = {
         "action": "status_change",
         "from": old_status,
@@ -1360,13 +1367,36 @@ def orch_chat(board, task_id, payload):
 
 # --- Performance monitor ----------------------------------------------------
 
-def _ticket_agent_pids():
+# TTL cache for the _ticket_agent_pids disk scan. The perf sampler calls
+# _owned_pids every ~3s; re-reading every board's ticket JSON that often burned
+# ~15-20% of a core at idle (and each file open is also scanned by the
+# endpoint-security filter driver, multiplying the cost in kernel time). The
+# scan only exists to recover PIDs dispatched before a server restart — newly
+# dispatched agents are tracked in-memory via _PROCS — so staleness up to the
+# TTL is cosmetic (Performance-tab owned/external labeling only).
+_TICKET_PIDS_TTL = 30.0
+_ticket_pids_cache = {"at": None, "pids": set()}
+
+
+def _ticket_pids_cache_clear():
+    _ticket_pids_cache["at"] = None
+    _ticket_pids_cache["pids"] = set()
+
+
+def _ticket_agent_pids(now=None):
     """Scan all board ticket files for in_progress orchestrator PIDs.
 
     After a server reboot _PROCS is empty, so this recovers the PIDs that were
     dispatched before the restart.  Only in_progress / blocked tickets are
     included — completed tickets' PIDs may have been reused by the OS.
+
+    The scan result is cached for _TICKET_PIDS_TTL seconds (see note above).
     """
+    if now is None:
+        now = time.monotonic()
+    at = _ticket_pids_cache["at"]
+    if at is not None and (now - at) < _TICKET_PIDS_TTL:
+        return _ticket_pids_cache["pids"]
     pids = set()
     try:
         for entry in _scandir_boards():
@@ -1388,6 +1418,8 @@ def _ticket_agent_pids():
                     pids.add(pid)
     except Exception:
         pass
+    _ticket_pids_cache["at"] = now
+    _ticket_pids_cache["pids"] = pids
     return pids
 
 

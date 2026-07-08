@@ -46,6 +46,8 @@ def _make_blocked_ticket(kanban, unanswered=True):
     with open(p, "r", encoding="utf-8") as f:
         t = json.load(f)
     t["status"] = "blocked"
+    # Ticket #100: ensure ticket has a model set so it can move to ready
+    t["model"] = "claude-opus-4-8"
     q = {
         "id": "q-1",
         "type": "input",
@@ -126,6 +128,8 @@ def test_non_blocked_move_does_not_clear_question(server, kanban):
     with open(p, "r", encoding="utf-8") as f:
         t = json.load(f)
     t["status"] = "todo"
+    # Ticket #100: ensure ticket has a model set so it can move to ready
+    t["model"] = "claude-opus-4-8"
     # Give it a question even though it's not blocked (shouldn't happen in practice,
     # but the server must not clear it if the source status wasn't blocked).
     t["orchestrator"] = {
@@ -179,6 +183,8 @@ def test_unblock_no_orchestrator_block_is_noop(server, kanban):
     with open(p, "r", encoding="utf-8") as f:
         t = json.load(f)
     t["status"] = "blocked"
+    # Ticket #100: ensure ticket has a model set so it can move to ready
+    t["model"] = "claude-opus-4-8"
     t.pop("orchestrator", None)
     with open(p, "w", encoding="utf-8") as f:
         json.dump(t, f)
