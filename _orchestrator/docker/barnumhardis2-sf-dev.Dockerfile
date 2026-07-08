@@ -34,10 +34,12 @@
 # SF org auth — SFDX_AUTH_URL passthrough
 # ----------------------------------------
 # The board's passthroughEnv carries per-org SFDX_AUTH_URL_* variables. Before
-# running sf commands the agent must log in:
+# running sf commands the agent must log in (verified working in sf 2.140.6):
 #
-#   sf org login sfdx-url --sfdx-url-value "$SFDX_AUTH_URL_WORKBOX2" \
-#       --alias Workbox2 --set-default
+#   echo "$SFDX_AUTH_URL_WORKBOX2" | sf org login sfdx-url \
+#       --sfdx-url-stdin - --alias Workbox2 --set-default
+#
+# Note: --sfdx-url-value does NOT exist in 2.140.6; use pipe + --sfdx-url-stdin -.
 #
 # To get the auth URL for each org on the host:
 #   sf org display --verbose -o Workbox2 --json | jq -r '.result.sfdxAuthUrl'
