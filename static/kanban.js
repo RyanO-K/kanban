@@ -720,6 +720,16 @@ function renderPanel(task){
     if(task.optional) html+='<span class="sp-tag opt">⚑ optional</span>';
     html+='</div></div>';
   }
+  const files=Array.isArray(task.files)?task.files:[];
+  if(files.length){
+    html+='<div class="sp-field"><div class="sp-field-label">Files</div><div class="sp-file-list">';
+    files.forEach(f=>{
+      const norm=String(f).replace(/\\/g,"/");
+      const href="vscode://file/"+norm.replace(/^\/+/,"");
+      html+='<a class="sp-file-link" href="'+esc(href)+'" title="Open in VS Code: '+esc(norm)+'">'+esc(norm.split("/").pop())+'</a>';
+    });
+    html+='</div></div>';
+  }
   html+='</div>';
 
   // Spec / plan section — surfaces any associated design docs. Each is an
