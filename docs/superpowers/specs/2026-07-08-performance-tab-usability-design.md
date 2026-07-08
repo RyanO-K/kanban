@@ -28,8 +28,9 @@ Out of scope (explicitly declined in review):
 - Orchestrator ON/OFF / Stop All controls on this tab.
 
 Constraint: **no new polling, no new subprocess spawns, no meaningful sampler
-CPU**. Everything rides the existing 3-second sample cycle and the data it
-already collects.
+CPU**. Everything rides the existing sample cycle and the data it already
+collects. Additionally the sample cycle itself gets cheaper: the sampler slows
+way down when nobody is watching (see Adaptive sampling).
 
 ## Architecture (Approach A — server-computed signals)
 
@@ -44,6 +45,22 @@ state (consecutive child-PID sets never cross the wire).
 
 ### 1. perf_monitor.py — sampler additions
 
+- **Adaptive sampling interval.** The sampler queries process CPU for every
+  session each cycle, 24/7 — the dominant standing cost. It now runs at the
+  fast cadence (3s, existing `interval`) only while someone is watching:
+  `snapshot()` records the time of each call (the server invokes it per
+  `/api/performance` request), and the sampler loop picks its next wait from
+  that — fast if a snapshot was served in the last 30s, otherwise a slow idle
+  cadence (`idle_interval = 30.0`). The UI polls every 3s while the tab is
+  open, so watched behavior is unchanged; unwatched background cost drops
+  ~90%. Detectors are time-based, not count-based, so they keep working at
+  idle cadence (coarser, self-tightening once the tab opens): `cpuAvg2m`
+  averages whatever history points fall in the last 120s — it adds **no** CPU
+  queries of its own, ever — and spawn churn diffs child-PID sets per sample
+  regardless of spacing. History points therefore carry their timestamps (they
+  already do: each point has `t`), and windows are computed by time, not by
+  point count.
+
 - **Self pseudo-session.** Each `sample_once` appends an entry for
   `os.getpid()` with `kind: "server"`, `owned: true` — CPU + RSS of the server
   process **only, no children rollup**: any claude.exe it spawned (triage,
@@ -55,7 +72,8 @@ state (consecutive child-PID sets never cross the wire).
   into a small deque; `spawnRate` = new PIDs over the last 60s (per minute).
   Cost: one set-diff per session per cycle.
 - **Sustained CPU.** `cpuAvg2m` = mean of the existing history deque's `cpu`
-  values over the last ~120s (≈40 samples). No new data collected.
+  values whose timestamps fall in the last 120s (≈40 points at fast cadence,
+  ≈4 at idle cadence). No new data collected, no extra CPU queries.
 - **Alerts.** Module constants `ALERT_CPU_AVG = 50.0` (percent of one core,
   2-minute average) and `ALERT_SPAWN_RATE = 10` (new child PIDs per minute).
   Snapshot gains `alerts: [{severity: "warn", pid, kind, message}]` with
@@ -108,6 +126,9 @@ Nothing existing is renamed or removed; old clients keep working.
   fake-process pattern:
   - spawn-rate: new child PIDs across fake samples produce the right per-minute
     rate; stable children produce 0.
+  - adaptive interval: a recent snapshot() call selects the fast cadence, a
+    stale one selects the idle cadence (pure function of last-served time —
+    no real sleeping in tests).
   - sustained CPU: history below/above threshold toggles the flag only after
     ≥60s of history.
   - alerts: correct message text, no alerts during cold start, self session
