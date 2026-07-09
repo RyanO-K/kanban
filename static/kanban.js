@@ -726,7 +726,7 @@ function renderPanel(task){
     files.forEach(f=>{
       const norm=String(f).replace(/\\/g,"/");
       const href="vscode://file/"+norm.replace(/^\/+/,"");
-      html+='<a class="sp-file-link" href="'+esc(href)+'" title="Open in VS Code: '+esc(norm)+'">'+esc(norm.split("/").pop())+'</a>';
+      html+='<a class="sp-file-link" href="#" data-vscode-href="'+esc(href)+'" title="'+esc(norm)+'">'+esc(norm.split("/").pop())+'</a>';
     });
     html+='</div></div>';
   }
@@ -824,6 +824,16 @@ function renderPanel(task){
       .catch(()=>showToast("Copy failed",true));
   });
   bindLogToggle(task,srcFile);
+
+  // File links: use window.open so vscode:// protocol navigates correctly
+  // inside VS Code's Simple Browser (direct <a href> navigation is blocked)
+  body.querySelectorAll(".sp-file-link").forEach(a=>{
+    a.addEventListener("click",e=>{
+      e.preventDefault();
+      const href=a.dataset.vscodeHref;
+      if(href) window.open(href,"_self");
+    });
+  });
 
   // Title edit button
   const titleEditBtn=$("spTitleEditBtn");
