@@ -21,6 +21,80 @@ META_FILE = "_meta.json"
 TICK_SECONDS = 60
 SKIP_DIRS = {"config", "_orchestrator", "__pycache__", "tests"}
 
+
+# --- SF org auth-URL population (ticket #98) ---------------------------------
+#
+# A module-level seam so tests can monkeypatch _sf_run without touching os.environ
+# or spawning real `sf` processes.
+
+def _sf_run(cmd, **kwargs):
+    """Run an `sf` CLI command and return a subprocess.CompletedProcess-like object."""
+    return subprocess.run(cmd, capture_output=True, text=True, **kwargs)
+
+
+def populate_sfdx_auth_urls():
+    """Enumerate all sf-authenticated orgs and set SFDX_AUTH_URL_<ALIAS> env vars.
+
+    1. Calls `sf org list --json` to get all orgs (nonScratchOrgs + sandboxes).
+    2. For each org with a non-empty alias, derives the var name via
+       oc.alias_to_env_var_name() and calls `sf org display --verbose` to get the
+       sfdxAuthUrl.
+    3. Sets the var in os.environ if not already present so it can be forwarded
+       via passthroughEnv on Docker dispatches.
+    4. Returns a summary dict: {found, populated, skipped: [...], failed: [...]}.
+
+    Entirely best-effort: sf not installed, non-zero exit, or malformed JSON all
+    produce an empty result rather than raising.
+    """
+    result = {"found": 0, "populated": 0, "skipped": [], "failed": []}
+    # Step 1: enumerate orgs.
+    try:
+        r = _sf_run(["sf", "org", "list", "--json"])
+    except OSError:
+        return result
+    if r.returncode != 0:
+        return result
+    try:
+        data = json.loads(r.stdout or "{}")
+        orgs_data = data.get("result") or {}
+        orgs = list(orgs_data.get("nonScratchOrgs") or [])
+        orgs += list(orgs_data.get("sandboxes") or [])
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        return result
+
+    # Filter to orgs with a usable alias.
+    aliased = [o for o in orgs if o.get("alias")]
+    result["found"] = len(aliased)
+
+    # Step 2-3: fetch and populate each.
+    for org in aliased:
+        alias = org["alias"]
+        var_name = oc.alias_to_env_var_name(alias)
+        # Don't overwrite a value the user already exported.
+        if os.environ.get(var_name):
+            result["skipped"].append(alias)
+            continue
+        try:
+            dr = _sf_run(["sf", "org", "display", "--verbose", "-o", alias, "--json"])
+        except OSError:
+            result["failed"].append(alias)
+            continue
+        if dr.returncode != 0:
+            result["failed"].append(alias)
+            continue
+        try:
+            dd = json.loads(dr.stdout or "{}")
+            auth_url = (dd.get("result") or {}).get("sfdxAuthUrl")
+        except (json.JSONDecodeError, AttributeError, TypeError):
+            auth_url = None
+        if not auth_url:
+            result["skipped"].append(alias)
+            continue
+        os.environ[var_name] = auth_url
+        result["populated"] += 1
+
+    return result
+
 # Registry of Popen objects for processes we spawned.
 # Maps pid (int) -> Popen so we can read real exit codes on reap.
 _PROCS = {}
@@ -2074,6 +2148,18 @@ def run_loop(kanban_dir=None, *, stop_event=None, tick_seconds=TICK_SECONDS,
         })
         return
     try:
+        # Populate SFDX_AUTH_URL_<ALIAS> env vars before the first tick (ticket #98)
+        # so passthroughEnv on useDocker boards can forward them into containers.
+        sf_result = populate_sfdx_auth_urls()
+        oc.append_activity(kanban_dir, {
+            "ts": oc.now_iso(), "kind": "info",
+            "message": (
+                f"SF auth URLs: {sf_result['found']} org(s) found, "
+                f"{sf_result['populated']} populated"
+                + (f", skipped {sf_result['skipped']}" if sf_result.get("skipped") else "")
+                + (f", failed {sf_result['failed']}" if sf_result.get("failed") else "")
+            ),
+        })
         while stop_event is None or not stop_event.is_set():
             try:
                 tick(kanban_dir, opus_triage=opus_triage)

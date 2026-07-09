@@ -30,6 +30,27 @@ def board_path(kanban_dir, board):
     """Absolute path to a single board's directory under boards_root()."""
     return os.path.join(boards_root(kanban_dir), board)
 
+
+def alias_to_env_var_name(alias):
+    """Derive the canonical SFDX_AUTH_URL_<ALIAS> env-var name from an org alias.
+
+    Rules (ticket #98):
+      - Uppercase the alias.
+      - Replace spaces with underscores.
+      - Strip every character that is not alphanumeric or underscore.
+      - Prefix with SFDX_AUTH_URL_.
+
+    Examples:
+      "Workbox2"           -> "SFDX_AUTH_URL_WORKBOX2"
+      "My Org"             -> "SFDX_AUTH_URL_MY_ORG"
+      "my-org.example"     -> "SFDX_AUTH_URL_MYORGEXAMPLE"
+      "Barnumhardis2 (SF)" -> "SFDX_AUTH_URL_BARNUMHARDIS2_SF"
+    """
+    upper = alias.upper()
+    with_underscores = upper.replace(" ", "_")
+    safe = re.sub(r"[^A-Z0-9_]", "", with_underscores)
+    return "SFDX_AUTH_URL_" + safe
+
 # The orchestrator's own background LLM calls (triage every tick, the pre-kill
 # progress summarizer) default to Opus but are configurable so a user can downgrade
 # the highest-frequency background cost. Empty/missing falls back to this default.
