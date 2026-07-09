@@ -60,6 +60,23 @@ function getModelName(modelId){
 }
 let currentFile=null, lastMtime=0, pollTimer=null, dragTaskId=null, dragFile=null, dragEl=null;
 let currentTasks=[], selectedTaskKey=null, currentBoardData=null;
+// Ticket #99: board preload cache. Maps board slug → {data, fetchedAt (ms epoch)}.
+// populateBoardCache() fills it after loadFiles() so switching boards is instant.
+const boardCache={};
+const BOARD_CACHE_TTL=30000; // cache valid for 30s
+async function prefetchBoard(slug){
+  if(!slug)return;
+  try{
+    const data=await apiFetch("/api/board/"+encodeURIComponent(slug));
+    boardCache[slug]={data,fetchedAt:Date.now()};
+  }catch(e){}
+}
+function getCachedBoard(slug){
+  const entry=boardCache[slug];
+  if(!entry)return null;
+  if(Date.now()-entry.fetchedAt>BOARD_CACHE_TTL)return null;
+  return entry.data;
+}
 // Ticket #61: while an optimistic drag-drop is reconciling, remember the moved
 // card's key + target column so a poll firing mid-move re-renders it into the
 // target column (not its stale source) and never duplicates or drops it.
@@ -225,6 +242,8 @@ async function loadFiles(){
     const prevFile=currentFile;
     const exists=prevFile&&(prevFile==="__all__"||files.some(f=>f.filename===prevFile));
     currentFile=exists?prevFile:allOpt.value;sel.value=currentFile;updateBoardSettingsBtn();startPolling();
+    // Ticket #99: background-prefetch every board (except __all__) so future switches are instant.
+    files.forEach(f=>{ if(f.filename!==currentFile) prefetchBoard(f.filename); });
   }catch(e){setServerDown(true);}
 }
 
@@ -235,6 +254,8 @@ async function poll(){
     const data=await apiFetch("/api/board/"+encodeURIComponent(currentFile)+since);
     if(!data.unchanged){
       currentBoardData=data;
+      // Ticket #99: keep the cache warm so switching back to this board is instant.
+      boardCache[currentFile]={data,fetchedAt:Date.now()};
       if(data.mtime!==lastMtime){lastMtime=data.mtime;currentTasks=data.tasks||[];renderBoard(data);if(selectedTaskKey)refreshPanel();}
     }
     pillState.lastUpdated="Updated "+new Date().toLocaleTimeString();
@@ -242,7 +263,28 @@ async function poll(){
     checkOrchStatus();
   }catch(e){setServerDown(true);}
 }
-function startPolling(){if(pollTimer)clearInterval(pollTimer);lastMtime=0;if(!$("board").querySelector(".column"))showBoardSkeleton();poll();pollTimer=setInterval(poll,POLL_MS);}
+// Ticket #99: startPolling optionally accepts cached board data so we can render
+// instantly on a board switch without waiting for a network round-trip. When
+// cachedData is provided the board paints immediately; poll() is still called to
+// pick up any changes that arrived since the cache was populated.
+function startPolling(cachedData){
+  if(pollTimer)clearInterval(pollTimer);
+  if(cachedData){
+    // Instant render from cache — no skeleton, no wait.
+    lastMtime=cachedData.mtime||0;
+    currentBoardData=cachedData;
+    currentTasks=cachedData.tasks||[];
+    renderBoard(cachedData);
+    if(selectedTaskKey)refreshPanel();
+    // Update the cache entry so it stays fresh for the next switch.
+    boardCache[currentFile]={data:cachedData,fetchedAt:Date.now()};
+  } else {
+    lastMtime=0;
+    if(!$("board").querySelector(".column"))showBoardSkeleton();
+  }
+  poll();
+  pollTimer=setInterval(poll,POLL_MS);
+}
 function showBoardSkeleton(){
   const board=$("board");board.innerHTML="";
   for(let i=0;i<5;i++){
@@ -1413,7 +1455,28 @@ $("taskForm").addEventListener("submit",async e=>{
 });
 
 // ── Init ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-$("boardSelect").addEventListener("change",e=>{currentFile=e.target.value;currentBoardData=null;closePanel();updateBoardSettingsBtn();if(currentFile)startPolling();});
+$("boardSelect").addEventListener("change",e=>{
+  currentFile=e.target.value;currentBoardData=null;closePanel();updateBoardSettingsBtn();
+  if(currentFile){
+    // Ticket #99: use cached board data for an instant render; fall back to the
+    // normal skeleton+fetch path when the cache is empty or stale.
+    startPolling(getCachedBoard(currentFile));
+  }
+});
+// Ticket #99: prefetch a board when the user hovers over its option in the select,
+// giving a head-start on the fetch before they release the click.
+(function bindSelectPrefetch(){
+  const sel=$("boardSelect");
+  let _lastHovered=null;
+  sel.addEventListener("mouseover",e=>{
+    const opt=e.target.closest("option");
+    if(!opt||opt.value===_lastHovered||!opt.value||opt.value==="__all__")return;
+    _lastHovered=opt.value;
+    if(!getCachedBoard(opt.value)) prefetchBoard(opt.value);
+  });
+  // Also handle keyboard navigation inside the select (change fires on commit, so
+  // we watch mouseover which covers hover; this is a best-effort enhancement).
+})();
 
 // ── Board Settings modal ──────────────────────────────────────────────────────────────────────────────────────────────────────
 // The "__all__" virtual board has no real _meta.json, so settings only apply
