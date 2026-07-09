@@ -1098,7 +1098,8 @@ def _probe_fable_available(timeout=10):
     """
     try:
         result = _run_tracked(
-            ["claude", "--model", oc.FABLE_MODEL, "-p", "", "--max-tokens", "1"],
+            ["claude", "--model", oc.FABLE_MODEL, "-p", "", "--max-tokens", "1",
+             *oc.superpowers_args(oc.FABLE_MODEL, utility=True)],
             "Probing fable availability",
             capture_output=True, text=True, timeout=timeout,
         )
@@ -1206,6 +1207,7 @@ def _docker_dispatch(kanban_dir, board, task, board_meta, prompt, session_id,
                  "--output-format", "stream-json", "--verbose"]
     if model:
         inner += ["--model", model]
+    inner += oc.superpowers_args(model)
     if allowed:
         inner += ["--allowedTools", ",".join(allowed)]
     passthrough = _resolve_passthrough_env(board_meta, log_f)
@@ -1311,6 +1313,7 @@ def spawn_agent(kanban_dir, board, task, profile, model):
                    "--output-format", "stream-json", "--verbose"]
         if model:
             cmd += ["--model", model]
+        cmd += oc.superpowers_args(model)
         if allowed:
             cmd += ["--allowedTools", ",".join(allowed)]
 
@@ -1644,7 +1647,8 @@ def _summarize_progress(kanban_dir, task, reason):
     timeout = state.get("triageTimeoutSeconds") or 120
     label = f"Summarizing ticket #{task.get('id', '?')} ({reason})"
     try:
-        out = _run_tracked(["claude", "-p", prompt, "--model", model], label,
+        out = _run_tracked(["claude", "-p", prompt, "--model", model,
+                            *oc.superpowers_args(model, utility=True)], label,
                            capture_output=True, text=True, timeout=timeout)
         summary = (out.stdout or "").strip()
         if summary:
@@ -2070,7 +2074,8 @@ def _real_sonnet_triage(kanban_dir, task, all_tasks, model=None, timeout=60):
     label = f"Assigning model for ticket #{task.get('id', '?')}"
     try:
         out = _run_tracked(
-            ["claude", "-p", prompt, "--model", model], label,
+            ["claude", "-p", prompt, "--model", model,
+             *oc.superpowers_args(model, utility=True)], label,
             capture_output=True, text=True, timeout=timeout,
         )
         text = (out.stdout or "").strip()
@@ -2096,7 +2101,8 @@ def _real_opus_triage(prompt, eligible, profiles, free, model=None, timeout=120)
     ids = ", ".join(str(t["id"]) for t in eligible[:5])
     label = f"Triage: dispatching tickets [{ids}]"
     try:
-        out = _run_tracked(["claude", "-p", full, "--model", model], label,
+        out = _run_tracked(["claude", "-p", full, "--model", model,
+                            *oc.superpowers_args(model, utility=True)], label,
                            capture_output=True, text=True, timeout=timeout)
         text = (out.stdout or "").strip()
         start, end = text.find("{"), text.rfind("}")

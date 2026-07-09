@@ -347,6 +347,25 @@ def board_mtime(board_path):
     return latest
 
 
+def docs_mtime():
+    """Newest mtime across markdown under .kanban/docs/ (0.0 when absent).
+
+    Folded into every board payload's `mtime` so a spec/plan edit invalidates
+    the `?since=` short-circuit and triggers a client re-render. Re-derives
+    the docs path from KANBAN_DIR at call time (KANBAN_DIR is monkeypatched
+    in tests; the module-level DOCS_DIR constant would go stale).
+    """
+    latest = 0.0
+    for root, _dirs, files in os.walk(os.path.join(KANBAN_DIR, "docs")):
+        for name in files:
+            if name.lower().endswith(".md"):
+                try:
+                    latest = max(latest, os.stat(os.path.join(root, name)).st_mtime)
+                except OSError:
+                    continue
+    return latest
+
+
 def touch_meta(board_path):
     """Bump _meta.json's `updated` field to today's date."""
     meta_path = os.path.join(board_path, META_FILE)
@@ -563,7 +582,9 @@ def load_all_boards():
         "updated": "",
         "filename": ALL_SLUG,
         "tasks": tasks,
-        "mtime": latest_mtime,
+        # Same formula as board_snapshot_mtime(ALL_SLUG) — the two must stay
+        # in lockstep or the ?since= short-circuit never (or always) fires.
+        "mtime": max(latest_mtime, docs_mtime()),
         "columns": COLUMNS,
     }, 200
 
@@ -602,7 +623,9 @@ def load_board(slug):
         "updated": meta.get("updated", ""),
         "filename": safe,
         "tasks": tasks,
-        "mtime": board_mtime(path),
+        # Same formula as board_snapshot_mtime(slug) — the two must stay in
+        # lockstep or the ?since= short-circuit never (or always) fires.
+        "mtime": max(board_mtime(path), docs_mtime()),
         "columns": COLUMNS,
     }
     # Pass through optional board-level metadata if present.
@@ -616,6 +639,49 @@ def load_board(slug):
     if isinstance(meta.get("context"), dict) and meta["context"].get("description"):
         result["description"] = meta["context"]["description"]
     return result, 200
+
+
+def board_snapshot_mtime(slug):
+    """Stat-only recomputation of the payload `mtime` load_board would return.
+
+    Used by board_get's ?since= short-circuit: file stats only — no ticket
+    JSON opens, no spec-index rebuild — so idle polls stay invisible to
+    on-access file scanning. Must stay in lockstep with load_board's payload
+    mtime (same formula), else the short-circuit never (or always) fires.
+    Returns None for an unknown board so the caller falls through to the full
+    load (which 404s as before).
+    """
+    if slug == ALL_SLUG:
+        latest = 0.0
+        for entry in _scandir_boards():
+            if entry.is_dir() and is_board(entry.path):
+                latest = max(latest, board_mtime(entry.path))
+        return max(latest, docs_mtime())
+    path, _safe = board_dir(slug)
+    if path is None or not is_board(path):
+        return None
+    return max(board_mtime(path), docs_mtime())
+
+
+def board_get(slug, since=None):
+    """GET /api/board/<slug>[?since=<mtime>] — full payload, or a cheap
+    {"unchanged": true} answer when nothing changed since `since`.
+
+    Polling clients echo back the `mtime` of the last payload they rendered;
+    when the stat-only snapshot still matches, the server skips the full load
+    entirely. A malformed `since`, an unknown board, or any mtime drift falls
+    through to load_board (unknown slugs keep their 404).
+    """
+    if since is not None:
+        try:
+            since_f = float(since)
+        except (TypeError, ValueError):
+            since_f = None
+        if since_f is not None:
+            snap = board_snapshot_mtime(slug)
+            if snap is not None and snap == since_f:
+                return {"unchanged": True, "mtime": snap}, 200
+    return load_board(slug)
 
 
 # Board-level metadata fields the UI is allowed to edit. `commitRequirements`
@@ -1654,7 +1720,8 @@ class KanbanHandler(BaseHTTPRequestHandler):
                 self.send_error(404)
         elif path.startswith("/api/board/"):
             slug = unquote(path[len("/api/board/"):])
-            data, status = load_board(slug)
+            since = parse_qs(parsed.query).get("since", [None])[0]
+            data, status = board_get(slug, since)
             self._json(data, status)
         elif path == "/api/models":
             self._json(*models_list())

@@ -231,9 +231,12 @@ async function loadFiles(){
 async function poll(){
   if(!currentFile)return;
   try{
-    const data=await apiFetch("/api/board/"+encodeURIComponent(currentFile));
-    currentBoardData=data;
-    if(data.mtime!==lastMtime){lastMtime=data.mtime;currentTasks=data.tasks||[];renderBoard(data);if(selectedTaskKey)refreshPanel();}
+    const since=lastMtime?"?since="+encodeURIComponent(lastMtime):"";
+    const data=await apiFetch("/api/board/"+encodeURIComponent(currentFile)+since);
+    if(!data.unchanged){
+      currentBoardData=data;
+      if(data.mtime!==lastMtime){lastMtime=data.mtime;currentTasks=data.tasks||[];renderBoard(data);if(selectedTaskKey)refreshPanel();}
+    }
     pillState.lastUpdated="Updated "+new Date().toLocaleTimeString();
     setServerDown(false);
     checkOrchStatus();

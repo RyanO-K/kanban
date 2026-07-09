@@ -62,6 +62,28 @@ DEFAULT_LOOP_MODEL = "claude-opus-4-8"
 FABLE_MODEL = "claude-fable-5"
 FABLE_FALLBACK_MODEL = "claude-opus-4-8"
 
+# The superpowers plugin's SessionStart hook costs a process spawn (plus its
+# context-injection tokens) on every claude session. That is only worth it for
+# sonnet- and opus-tier ticket agents: haiku-tier agents and the orchestrator's
+# utility calls (triage, summarizer, probes) disable the plugin with a
+# per-invocation `--settings` override.
+SUPERPOWERS_PLUGIN = "superpowers@claude-plugins-official"
+
+
+def superpowers_args(model, utility=False):
+    """Extra claude argv that disables the superpowers plugin when it isn't
+    worth its per-session spawn cost.
+
+    Utility calls (`utility=True`) and haiku-tier models get the disable
+    override. Sonnet/opus/fable tiers keep the plugin, as does an unknown or
+    missing model — no `--model` flag means the CLI default (sonnet tier or
+    higher) applies.
+    """
+    if utility or (model and "haiku" in model.lower()):
+        return ["--settings",
+                json.dumps({"enabledPlugins": {SUPERPOWERS_PLUGIN: False}})]
+    return []
+
 DEFAULT_STATE = {"enabled": False, "concurrencyCap": 3,
                  "stopAllRequested": False, "idleSeconds": 600,
                  "tickSeconds": 60, "maxAgentSeconds": 0, "triageTimeoutSeconds": 120,
@@ -1166,11 +1188,14 @@ def promotable_tickets(tasks):
 
     These are ready to start work but not yet queued, so the tick loop promotes
     them to `ready`. Dependency resolution is per-board, mirroring eligibility.
+    Tickets without a real model specified are not promotable (ticket #100).
     """
     dep_met = _dep_met_fn(tasks)
     out = []
     for t in tasks:
         if t.get("status") != "todo":
+            continue
+        if not (t.get("model") or "").strip():
             continue
         if all(dep_met(t.get("_board"), d) for d in _deps_of(t)):
             out.append(t)
