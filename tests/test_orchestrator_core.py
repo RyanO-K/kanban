@@ -785,6 +785,54 @@ def test_usage_limit_from_transcript_tail_detects_plain_stderr():
     assert oc.usage_limit_from_transcript_tail(tail) == {"resetAt": 1719500000}
 
 
+def test_parse_usage_limit_session_limit_wording():
+    """CLI ~2.1.x reworded the limit message to "session limit" — it must still
+    be detected (ticket #99 regression: the old regex only matched "usage
+    limit", so the ticket was blocked as a crash instead of parked)."""
+    out = oc.parse_usage_limit(
+        "You've hit your session limit · resets 2:10pm (America/New_York)")
+    assert out == {"resetAt": None}
+
+
+def test_usage_limit_from_transcript_tail_rate_limit_event():
+    """A rejected `rate_limit_event` line is the authoritative structured
+    signal: its `resetsAt` epoch is returned even though the human-readable
+    result text carries no parseable epoch (ticket #99's actual run log)."""
+    tail = "\n".join([
+        json.dumps({
+            "type": "rate_limit_event",
+            "rate_limit_info": {"status": "rejected", "resetsAt": 1783620600,
+                                "rateLimitType": "five_hour"},
+        }),
+        json.dumps({
+            "type": "result", "subtype": "success", "is_error": True,
+            "api_error_status": 429,
+            "result": "You've hit your session limit · resets 2:10pm (America/New_York)",
+        }),
+    ])
+    assert oc.usage_limit_from_transcript_tail(tail) == {"resetAt": 1783620600}
+
+
+def test_usage_limit_from_transcript_tail_allowed_rate_limit_event_ignored():
+    """A `rate_limit_event` whose status is not "rejected" (e.g. an advisory
+    warning while the run continues) must not park dispatch."""
+    tail = json.dumps({
+        "type": "rate_limit_event",
+        "rate_limit_info": {"status": "allowed", "resetsAt": 1783620600},
+    })
+    assert oc.usage_limit_from_transcript_tail(tail) is None
+
+
+def test_usage_limit_from_transcript_tail_result_429_without_phrase():
+    """A terminal `result` line with api_error_status 429 is a limit even if
+    the wording changes again and no known phrase matches."""
+    tail = json.dumps({
+        "type": "result", "is_error": True, "api_error_status": 429,
+        "result": "Some future wording we do not recognise",
+    })
+    assert oc.usage_limit_from_transcript_tail(tail) == {"resetAt": None}
+
+
 def test_usage_pause_set_with_explicit_reset(kanban):
     """Setting a pause with a known future reset epoch parks dispatch until then."""
     oc.set_usage_pause(kanban, reset_at=1000, now_ts=100, reason="ticket 1")

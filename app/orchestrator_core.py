@@ -796,7 +796,11 @@ def read_activity(kanban_dir, limit=200):
 # limits run on a rolling ~5-hour window, so wait that long before probing again.
 DEFAULT_USAGE_RESET_SECONDS = 5 * 3600
 
-_USAGE_LIMIT_RE = re.compile(r"usage limit", re.IGNORECASE)
+# The CLI has used several wordings for the same condition: the classic
+# "Claude AI usage limit reached|<epoch>" and (CLI ~2.1.x) "You've hit your
+# session limit · resets 2:10pm" — match either noun so a wording change
+# doesn't silently turn limits back into "crashes" (ticket #99 regression).
+_USAGE_LIMIT_RE = re.compile(r"(?:usage|session) limit", re.IGNORECASE)
 _RESET_EPOCH_RE = re.compile(r"(\d{10,13})")
 
 
@@ -842,6 +846,12 @@ def usage_limit_from_transcript_tail(tail):
     "assistant" lines are skipped since their content is arbitrary
     (potentially containing the literal phrase without meaning a real limit
     was hit). Lines that are not JSON at all (plain stderr) are scanned as-is.
+
+    Besides the phrase match, two structured signals are recognised (CLI
+    ~2.1.x emits both, and neither carries a machine-readable epoch in its
+    human text): a `rate_limit_event` line whose `rate_limit_info.status` is
+    "rejected" (its `resetsAt` is the authoritative reset epoch), and a
+    terminal `result` line with `api_error_status` 429.
     Returns the same shape as `parse_usage_limit`, or `None`.
     """
     if not tail:
@@ -855,9 +865,19 @@ def usage_limit_from_transcript_tail(tail):
                 obj = json.loads(line)
             except (ValueError, TypeError):
                 continue
-            if not isinstance(obj, dict) or obj.get("type") not in _STATUS_LINE_TYPES:
+            if not isinstance(obj, dict):
+                continue
+            if obj.get("type") == "rate_limit_event":
+                info = obj.get("rate_limit_info") or {}
+                if info.get("status") == "rejected":
+                    reset_at = info.get("resetsAt")
+                    return {"resetAt": int(reset_at) if isinstance(reset_at, (int, float)) else None}
+                continue
+            if obj.get("type") not in _STATUS_LINE_TYPES:
                 continue
             limit = parse_usage_limit(json.dumps(obj))
+            if limit is None and obj.get("type") == "result" and obj.get("api_error_status") == 429:
+                limit = {"resetAt": None}
         else:
             limit = parse_usage_limit(line)
         if limit is not None:
