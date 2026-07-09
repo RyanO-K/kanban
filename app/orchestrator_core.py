@@ -825,6 +825,46 @@ def parse_usage_limit(text):
     return {"resetAt": reset_at}
 
 
+# stream-json line types that can legitimately carry the CLI's OWN terminal
+# status (as opposed to "user"/"assistant" content blocks, which just echo
+# whatever the sub-agent read or wrote — e.g. a Read/cat of orchestrator_core.py
+# itself, whose comments and docstrings talk about "usage limit" detection).
+_STATUS_LINE_TYPES = {"result", "system"}
+
+
+def usage_limit_from_transcript_tail(tail):
+    """Detect a genuine usage-limit signal in a raw log tail, ignoring the
+    phrase when it only appears inside echoed tool/file content.
+
+    `tail` may be a stream-json transcript (one JSON object per line) or plain
+    text (e.g. stderr). Each line that parses as JSON is only scanned when its
+    top-level "type" is a CLI-status type (`_STATUS_LINE_TYPES`); "user"/
+    "assistant" lines are skipped since their content is arbitrary
+    (potentially containing the literal phrase without meaning a real limit
+    was hit). Lines that are not JSON at all (plain stderr) are scanned as-is.
+    Returns the same shape as `parse_usage_limit`, or `None`.
+    """
+    if not tail:
+        return None
+    for line in tail.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line[0] in "{[":
+            try:
+                obj = json.loads(line)
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(obj, dict) or obj.get("type") not in _STATUS_LINE_TYPES:
+                continue
+            limit = parse_usage_limit(json.dumps(obj))
+        else:
+            limit = parse_usage_limit(line)
+        if limit is not None:
+            return limit
+    return None
+
+
 # Login-error phrases the CLI prints when the agent process has no valid auth.
 # Both strings are matched case-insensitively anywhere in the log/output so a
 # stream-json blob with the phrase inside a result field is also caught.
@@ -840,6 +880,37 @@ def parse_login_error(text):
     if not text:
         return False
     return bool(_LOGIN_ERROR_RE.search(text))
+
+
+def login_error_from_transcript_tail(tail):
+    """Detect a genuine login error in a raw log tail, ignoring the phrases
+    when they only appear inside echoed tool/file content.
+
+    Same line filtering as `usage_limit_from_transcript_tail`: a JSON line is
+    only scanned when its top-level "type" is a CLI-status type
+    (`_STATUS_LINE_TYPES`); "user"/"assistant" content blocks are skipped since
+    they echo arbitrary file/tool content — e.g. this module's own
+    `_LOGIN_ERROR_RE` source, the ticket #104 false positive. Non-JSON lines
+    (plain stderr) are scanned as-is. Returns True/False.
+    """
+    if not tail:
+        return False
+    for line in tail.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line[0] in "{[":
+            try:
+                obj = json.loads(line)
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(obj, dict) or obj.get("type") not in _STATUS_LINE_TYPES:
+                continue
+            if parse_login_error(json.dumps(obj)):
+                return True
+        elif parse_login_error(line):
+            return True
+    return False
 
 
 def _usage_pause_path(kanban_dir):

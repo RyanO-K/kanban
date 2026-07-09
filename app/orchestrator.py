@@ -1742,7 +1742,7 @@ def tick(kanban_dir, *, opus_triage, summarize_progress=None, initial_triage=Non
             # and prints "usage limit reached|<reset-epoch>"). That isn't a real
             # failure and needs no human: re-queue the ticket and park dispatch
             # until the limit resets, when the tick loop resumes on its own.
-            limit = oc.parse_usage_limit(tail)
+            limit = oc.usage_limit_from_transcript_tail(tail)
             if limit is not None:
                 reset = limit.get("resetAt")
                 oc.set_usage_pause(kanban_dir, reset, now,
@@ -1763,7 +1763,7 @@ def tick(kanban_dir, *, opus_triage, summarize_progress=None, initial_triage=Non
             # A login error ("Not logged in" / "Please run /login") means the CLI
             # has no valid auth — the agent cannot do real work. Record loginError
             # on the ticket so the UI can surface it, and block for human action.
-            if oc.parse_login_error(tail):
+            if oc.login_error_from_transcript_tail(tail):
                 t["loginError"] = True
                 _add_comment(t, "NEEDS HUMAN: agent is not logged in. "
                                 "Run `claude /login` or set ANTHROPIC_API_KEY, "

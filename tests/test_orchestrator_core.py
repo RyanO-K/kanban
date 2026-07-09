@@ -748,6 +748,43 @@ def test_parse_usage_limit_none_for_unrelated_text():
     assert oc.parse_usage_limit(None) is None
 
 
+def test_usage_limit_from_transcript_tail_ignores_echoed_source():
+    """A sub-agent that reads/cats orchestrator_core.py's own source (whose
+    comments and docstrings discuss usage-limit detection) must not trigger a
+    false pause: the phrase only appears inside a "user" tool_result content
+    block, not the CLI's own result/system status."""
+    tool_result_line = json.dumps({
+        "type": "user",
+        "message": {"role": "user", "content": [{
+            "type": "tool_result",
+            "content": "def parse_usage_limit(text):\n    # Claude usage limit reached|123 is the canonical form",
+        }]},
+    })
+    result_line = json.dumps({
+        "type": "result", "subtype": "error_during_execution",
+        "is_error": True, "stop_reason": "tool_use",
+    })
+    tail = tool_result_line + "\n" + result_line
+    assert oc.usage_limit_from_transcript_tail(tail) is None
+
+
+def test_usage_limit_from_transcript_tail_detects_real_result_line():
+    """A genuine usage-limit signal in the CLI's own terminal `result` line is
+    still detected."""
+    tail = json.dumps({
+        "type": "result", "is_error": True,
+        "result": "Claude AI usage limit reached|1719500000",
+    })
+    assert oc.usage_limit_from_transcript_tail(tail) == {"resetAt": 1719500000}
+
+
+def test_usage_limit_from_transcript_tail_detects_plain_stderr():
+    """Non-JSON lines (plain stderr from a non-stream-json invocation) are
+    scanned directly."""
+    tail = "Claude AI usage limit reached|1719500000\n"
+    assert oc.usage_limit_from_transcript_tail(tail) == {"resetAt": 1719500000}
+
+
 def test_usage_pause_set_with_explicit_reset(kanban):
     """Setting a pause with a known future reset epoch parks dispatch until then."""
     oc.set_usage_pause(kanban, reset_at=1000, now_ts=100, reason="ticket 1")
@@ -825,6 +862,44 @@ def test_parse_login_error_none_for_unrelated_text():
 def test_parse_login_error_none_for_usage_limit():
     """A usage limit message does not trigger the login error detector."""
     assert oc.parse_login_error("Claude AI usage limit reached|1719500000") is False
+
+
+def test_login_error_from_transcript_tail_ignores_echoed_source():
+    """A sub-agent that reads/cats orchestrator_core.py's own source (whose
+    _LOGIN_ERROR_RE literal and docstring contain the login phrases) must not
+    be flagged as logged-out: the phrase only appears inside a "user"
+    tool_result content block, not the CLI's own result/system status.
+    Real incident: ticket #104's run, log 104-20260709T134359+0000.log."""
+    tool_result_line = json.dumps({
+        "type": "user",
+        "message": {"role": "user", "content": [{
+            "type": "tool_result",
+            "content": '_LOGIN_ERROR_RE = re.compile(r"not logged in|'
+                       'please run /login", re.IGNORECASE)',
+        }]},
+    })
+    result_line = json.dumps({
+        "type": "result", "subtype": "error_during_execution",
+        "is_error": True, "stop_reason": "tool_use",
+    })
+    tail = tool_result_line + "\n" + result_line
+    assert oc.login_error_from_transcript_tail(tail) is False
+
+
+def test_login_error_from_transcript_tail_detects_real_result_line():
+    """A genuine login error in the CLI's own terminal `result` line is
+    still detected."""
+    tail = json.dumps({
+        "type": "result", "is_error": True,
+        "result": "Not logged in. Please run /login.",
+    })
+    assert oc.login_error_from_transcript_tail(tail) is True
+
+
+def test_login_error_from_transcript_tail_detects_plain_stderr():
+    """Non-JSON lines (plain stderr from a non-stream-json invocation) are
+    scanned directly."""
+    assert oc.login_error_from_transcript_tail("Error: Not logged in\n") is True
 
 
 # --- Agent chat: pure helpers (spec docs/specs/2026-07-03-agent-chat-design.md) ---
