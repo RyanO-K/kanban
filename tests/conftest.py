@@ -23,10 +23,10 @@ def kanban(tmp_path):
     board.mkdir(parents=True)
     (board / "_meta.json").write_text(json.dumps({"project": "Demo"}), encoding="utf-8")
     (board / "1.json").write_text(
-        json.dumps({"id": "1", "title": "First", "status": "todo"}), encoding="utf-8"
+        json.dumps({"id": "1", "title": "First", "status": "todo", "model": "claude-opus-4-8"}), encoding="utf-8"
     )
     (board / "2.json").write_text(
-        json.dumps({"id": "2", "title": "Second", "status": "todo", "dependsOn": ["1"]}),
+        json.dumps({"id": "2", "title": "Second", "status": "todo", "dependsOn": ["1"], "model": "claude-opus-4-8"}),
         encoding="utf-8",
     )
     (root / "config").mkdir()
