@@ -42,13 +42,19 @@
   </div>
 </div>
 <!-- Setup: merged project-agnostic config + live orchestrator controls (ticket #64).
-     Holds the orchestrator panel (live controls + inbox/in-flight/activity) above the
-     profiles panel (concurrency cap + agent profiles). renderOrchestrator()/renderProfiles()
-     keep writing into their own inner panels unchanged. -->
+     Holds the orchestrator panel (live controls + inbox/in-flight) above the
+     profiles panel (concurrency cap + agent profiles), with activity log collapsed at bottom. -->
 <div class="view-panel" id="view-setup" style="display:none;overflow:auto;height:calc(100vh - var(--topbar-h, 52px));">
   <div id="view-orchestrator" style="padding:18px 18px 0;"></div>
   <hr style="border:none;border-top:1px solid var(--surface-alt);margin:8px 18px 0;">
   <div id="view-profiles" style="padding:18px;"></div>
+  <hr style="border:none;border-top:1px solid var(--surface-alt);margin:0 18px;">
+  <details id="activityDetails" style="padding:0 18px 18px;">
+    <summary style="font-size:16px;font-weight:600;padding:14px 0 10px;cursor:pointer;list-style:none;display:flex;align-items:center;gap:6px;user-select:none;">
+      <span id="activityChevron" style="font-size:12px;transition:transform .15s;">&#9654;</span> Activity
+    </summary>
+    <div id="feed"></div>
+  </details>
 </div>
 <div class="view-panel" id="view-performance" style="display:none;padding:18px;overflow:auto;height:calc(100vh - var(--topbar-h, 52px));"></div>
 

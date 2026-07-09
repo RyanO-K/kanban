@@ -1746,8 +1746,6 @@ async function renderOrchestrator(){
   const inFlight = (all.tasks||[]).filter(t=>t.orchestrator&&t.orchestrator.state==="dispatched");
   html += '<h2 style="font-size:16px;margin:18px 0 10px;">In flight ('+inFlight.length+')</h2><div id="inflight"></div>';
 
-  // Activity feed.
-  html += '<h2 style="font-size:16px;margin:18px 0 10px;">Activity</h2><div id="feed"></div>';
   wrap.innerHTML = html;
 
   $("orchToggle").addEventListener("change", async (ev)=>{
@@ -1810,12 +1808,26 @@ async function renderOrchestrator(){
   });
 
   const feed=$("feed");
-  (activity.entries||[]).slice().reverse().slice(0,80).forEach(e=>{
-    const row=document.createElement("div");
-    row.style.cssText="font-size:12px;color:var(--text-muted);padding:4px 0;border-bottom:1px solid var(--surface-alt);";
-    row.textContent="["+(e.kind||"")+"] #"+(e.ticket||"")+" "+(e.reason||e.message||"")+"  "+(e.ts||"");
-    feed.appendChild(row);
-  });
+  if(feed){
+    feed.innerHTML="";
+    (activity.entries||[]).slice().reverse().slice(0,80).forEach(e=>{
+      const row=document.createElement("div");
+      row.style.cssText="font-size:12px;color:var(--text-muted);padding:4px 0;border-bottom:1px solid var(--surface-alt);";
+      row.textContent="["+(e.kind||"")+"] #"+(e.ticket||"")+" "+(e.reason||e.message||"")+"  "+(e.ts||"");
+      feed.appendChild(row);
+    });
+    if(!feed.children.length) feed.innerHTML='<div style="color:var(--text-muted);font-size:12px;">No activity yet.</div>';
+  }
+
+  const actDet=$("activityDetails");
+  const actChev=$("activityChevron");
+  if(actDet && actChev){
+    actChev.style.transform=actDet.open?"rotate(90deg)":"";
+    if(!actDet._chevronWired){
+      actDet._chevronWired=true;
+      actDet.addEventListener("toggle",()=>{ actChev.style.transform=actDet.open?"rotate(90deg)":""; });
+    }
+  }
 }
 
 function questionCard(t){
