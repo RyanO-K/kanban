@@ -1570,26 +1570,60 @@ def _nudge_initial_triage(kanban_dir, task, all_tasks):
     return _orch._real_sonnet_triage(kanban_dir, task, all_tasks)
 
 
+# Serialization state for nudge: at most one tick runs at a time; at most one
+# follow-up tick waits in the backlog.
+_nudge_lock = threading.Lock()
+_nudge_running = False   # True while a tick thread is executing
+_nudge_queued = False    # True when a follow-up tick is waiting
+
+
+def orch_nudge_tick():
+    """Execute one nudge tick (real implementation).
+
+    Exposed as a module-level name so tests can monkeypatch it.
+    """
+    import orchestrator as _orch
+    _orch.tick(KANBAN_DIR, opus_triage=_nudge_opus_triage,
+               initial_triage=_nudge_initial_triage)
+
+
 def orch_nudge():
     """Trigger an immediate orchestrator tick in a background daemon thread.
 
-    The nudge does not wait for the tick to complete — it queues it and returns
-    immediately so the HTTP response is not held open for the full tick duration
-    (which can be tens of seconds when triage calls Opus). The tick uses the
-    same `_nudge_opus_triage` and `_nudge_initial_triage` seams so tests can
-    stub them out.
+    Only one tick runs at a time.  If nudge is called while a tick is running,
+    a single follow-up tick is queued (additional calls are no-ops — the cap is
+    1 queued item).  The queued tick fires automatically when the current one
+    finishes.
+
+    The call always returns immediately so the HTTP response is not held open for
+    the full tick duration (which can be tens of seconds when triage calls Opus).
     """
-    import orchestrator as _orch
+    global _nudge_running, _nudge_queued
+
+    with _nudge_lock:
+        if _nudge_running:
+            # Cap backlog at 1.
+            _nudge_queued = True
+            return {"ok": True, "queued": True}, 200
+        _nudge_running = True
 
     def _run():
-        try:
-            _orch.tick(KANBAN_DIR, opus_triage=_nudge_opus_triage,
-                       initial_triage=_nudge_initial_triage)
-        except Exception as e:
-            _oc.append_activity(KANBAN_DIR, {
-                "ts": now_iso(), "kind": "error",
-                "message": f"nudge tick failed: {e}",
-            })
+        global _nudge_running, _nudge_queued
+        while True:
+            try:
+                orch_nudge_tick()
+            except Exception as e:
+                _oc.append_activity(KANBAN_DIR, {
+                    "ts": now_iso(), "kind": "error",
+                    "message": f"nudge tick failed: {e}",
+                })
+            with _nudge_lock:
+                if _nudge_queued:
+                    _nudge_queued = False
+                    # Loop around to run the queued tick.
+                    continue
+                _nudge_running = False
+                break
 
     t = threading.Thread(target=_run, name="nudge-tick", daemon=True)
     t.start()
