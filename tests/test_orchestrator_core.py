@@ -246,7 +246,7 @@ def test_no_resume_when_not_unblocked():
 
 def test_promotable_todo_with_no_deps():
     """A todo ticket with no dependencies is promotable to ready."""
-    tasks = [{"id": "1", "status": "todo"}]
+    tasks = [{"id": "1", "status": "todo", "model": "claude-opus-4-8"}]
     assert [t["id"] for t in oc.promotable_tickets(tasks)] == ["1"]
 
 
@@ -254,7 +254,7 @@ def test_promotable_todo_with_met_deps():
     """A todo ticket whose deps are all completed is promotable to ready."""
     tasks = [
         {"id": "1", "status": "completed"},
-        {"id": "2", "status": "todo", "dependsOn": ["1"]},
+        {"id": "2", "status": "todo", "dependsOn": ["1"], "model": "claude-opus-4-8"},
     ]
     assert [t["id"] for t in oc.promotable_tickets(tasks)] == ["2"]
 
@@ -262,8 +262,8 @@ def test_promotable_todo_with_met_deps():
 def test_not_promotable_todo_with_unmet_deps():
     """A todo ticket with an incomplete dependency is NOT promotable."""
     tasks = [
-        {"id": "1", "status": "todo"},
-        {"id": "2", "status": "todo", "dependsOn": ["1"]},
+        {"id": "1", "status": "todo", "model": "claude-opus-4-8"},
+        {"id": "2", "status": "todo", "dependsOn": ["1"], "model": "claude-opus-4-8"},
     ]
     assert [t["id"] for t in oc.promotable_tickets(tasks)] == ["1"]
 
@@ -289,12 +289,24 @@ def test_promotable_deps_resolved_per_board():
     """Promotion respects per-board dependency scoping like eligibility does."""
     tasks = [
         {"_board": "A", "id": "1", "status": "completed"},
-        {"_board": "B", "id": "1", "status": "todo"},
-        {"_board": "B", "id": "2", "status": "todo", "dependsOn": ["1"]},
+        {"_board": "B", "id": "1", "status": "todo", "model": "claude-opus-4-8"},
+        {"_board": "B", "id": "2", "status": "todo", "dependsOn": ["1"], "model": "claude-opus-4-8"},
     ]
     promo = {(t["_board"], t["id"]) for t in oc.promotable_tickets(tasks)}
     assert ("B", "2") not in promo  # its dep (B,1) is still todo
     assert ("B", "1") in promo
+
+
+def test_not_promotable_todo_without_model():
+    """A todo ticket without a real model is NOT promotable (ticket #100)."""
+    tasks = [
+        {"id": "1", "status": "todo", "model": "claude-opus-4-8"},
+        {"id": "2", "status": "todo"},  # no model
+        {"id": "3", "status": "todo", "model": ""},  # empty model
+        {"id": "4", "status": "todo", "model": "  "},  # whitespace only
+    ]
+    promo_ids = [t["id"] for t in oc.promotable_tickets(tasks)]
+    assert promo_ids == ["1"]
 
 
 def test_eligible_dispatches_from_ready_not_todo():
@@ -379,7 +391,7 @@ def test_promotable_string_dep_completed():
     """dependsOn given as a plain string is treated as a single dependency."""
     tasks = [
         {"id": "1", "status": "completed"},
-        {"id": "2", "status": "todo", "dependsOn": "1"},
+        {"id": "2", "status": "todo", "dependsOn": "1", "model": "claude-opus-4-8"},
     ]
     assert [t["id"] for t in oc.promotable_tickets(tasks)] == ["2"]
 
@@ -387,8 +399,8 @@ def test_promotable_string_dep_completed():
 def test_promotable_string_dep_incomplete():
     """dependsOn as a string where the dep is not completed — not promotable."""
     tasks = [
-        {"id": "1", "status": "todo"},
-        {"id": "2", "status": "todo", "dependsOn": "1"},
+        {"id": "1", "status": "todo", "model": "claude-opus-4-8"},
+        {"id": "2", "status": "todo", "dependsOn": "1", "model": "claude-opus-4-8"},
     ]
     assert [t["id"] for t in oc.promotable_tickets(tasks)] == ["1"]
 
@@ -403,7 +415,7 @@ def test_promotable_dep_satisfied_by_done_status():
     """A dependency counts as met when the dep is `done` (not just `completed`)."""
     tasks = [
         {"id": "1", "status": "done"},
-        {"id": "2", "status": "todo", "dependsOn": ["1"]},
+        {"id": "2", "status": "todo", "dependsOn": ["1"], "model": "claude-opus-4-8"},
     ]
     assert [t["id"] for t in oc.promotable_tickets(tasks)] == ["2"]
 
@@ -414,8 +426,8 @@ def test_promotable_deps_resolved_per_board_strict():
     while (A,1) is completed — (B,2) must NOT be promotable."""
     tasks = [
         {"_board": "A", "id": "1", "status": "completed"},
-        {"_board": "B", "id": "1", "status": "todo"},
-        {"_board": "B", "id": "2", "status": "todo", "dependsOn": ["1"]},
+        {"_board": "B", "id": "1", "status": "todo", "model": "claude-opus-4-8"},
+        {"_board": "B", "id": "2", "status": "todo", "dependsOn": ["1"], "model": "claude-opus-4-8"},
     ]
     promo = {(t["_board"], t["id"]) for t in oc.promotable_tickets(tasks)}
     assert ("B", "2") not in promo
