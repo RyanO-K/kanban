@@ -394,9 +394,23 @@ function closePanel(){
   $("board").classList.remove("panel-open");
   document.querySelectorAll(".card.selected").forEach(c=>c.classList.remove("selected"));
 }
+// Ticket #101: is the user mid-edit in the side panel? The inline editors mount
+// a <textarea> (description, class sp-detail-edit — startDetailEdit) or an
+// <input> (title, class sp-title-input — startTitleEdit) into the panel. While
+// one is open its value is unsaved DOM-only state, so a poll-driven re-render
+// (body.innerHTML=… in renderPanel) would silently discard whatever was typed.
+function panelHasOpenEdit(){
+  const panel=$("sidePanel");
+  if(!panel)return false;
+  return !!panel.querySelector("textarea.sp-detail-edit, input.sp-title-input");
+}
 function refreshPanel(){
   const t=currentTasks.find(x=>taskKey(x)===selectedTaskKey);
   if(!t){closePanel();return;}
+  // Ticket #101: never tear down the panel out from under an in-progress inline
+  // edit — that wipes the user's unsaved description/title text. Skip this poll's
+  // re-render; the next poll after they save/cancel picks up server changes.
+  if(panelHasOpenEdit())return;
   // Preserve comment draft across re-renders
   const draftMsg=$("spCMsg"),draftWriter=$("spCWriter");
   const savedMsg=draftMsg?draftMsg.value:"",savedWriter=draftWriter?draftWriter.value:"";
