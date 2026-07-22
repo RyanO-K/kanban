@@ -281,3 +281,33 @@ def test_moving_to_other_columns_ignores_model(board, monkeypatch):
     # Move to done — should succeed (model check only for ready)
     result, status = ks.update_task_status("demo", "1", "done")
     assert status == 200
+
+
+# --- Ticket #107: Add Fable to default models ---
+
+
+def test_fable_5_in_default_models():
+    """claude-fable-5 must be in DEFAULT_MODELS so it is always available as a fallback
+    even when live API discovery fails or ANTHROPIC_API_KEY is absent."""
+    values = [m["value"] for m in ks.DEFAULT_MODELS]
+    assert "claude-fable-5" in values, "Fable 5 missing from DEFAULT_MODELS"
+
+
+def test_discover_models_tries_auth_token_when_api_key_absent(monkeypatch):
+    """discover_models should fall back to ANTHROPIC_AUTH_TOKEN when ANTHROPIC_API_KEY
+    is absent. In Claude Code OAuth environments, only ANTHROPIC_AUTH_TOKEN may be set."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "test-auth-token")
+
+    payload = {"data": [
+        {"id": "claude-fable-5", "display_name": "Fable 5"},
+        {"id": "claude-opus-4-8", "display_name": "Opus 4.8"},
+    ]}
+
+    def fake_opener(req, timeout=None):
+        return _FakeResponse(payload)
+
+    models = ks.discover_models(opener=fake_opener)
+    ids = [m["value"] for m in models]
+    assert "claude-fable-5" in ids
+    assert "claude-opus-4-8" in ids
