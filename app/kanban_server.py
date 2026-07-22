@@ -1230,6 +1230,69 @@ def orch_state_put(payload):
     return state, 200
 
 
+# --- Server config (CPU cap etc.) -------------------------------------------
+
+def _read_server_config_raw():
+    """Return the raw server.json dict (host/port/cpuLimitPercent), or {}."""
+    try:
+        with open(SERVER_CONFIG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def server_config_get():
+    """Expose the editable server settings the UI can tune (CPU cap).
+
+    `effectivePercent` is the cap actually in force after precedence (0 = no
+    cap). `envOverride` is true when KANBAN_CPU_LIMIT is set, in which case
+    edits to server.json are persisted but do not change what's applied.
+    """
+    import cpu_limiter
+    raw = _read_server_config_raw()
+    effective = cpu_limiter.resolve_limit_percent(SERVER_CONFIG_PATH)
+    return {
+        "cpuLimitPercent": raw.get("cpuLimitPercent"),
+        "effectivePercent": effective or 0,
+        "envOverride": os.environ.get("KANBAN_CPU_LIMIT") is not None,
+    }, 200
+
+
+def server_config_put(payload):
+    """Persist a new CPU cap to server.json and re-apply it live.
+
+    Preserves the other keys (host/port). The value is clamped to 0..100 (0
+    disables the cap). The live re-apply respects env precedence: what gets
+    applied is the resolved effective cap, so a KANBAN_CPU_LIMIT override still
+    wins even though the file is updated.
+    """
+    import cpu_limiter
+    if not isinstance(payload, dict) or "cpuLimitPercent" not in payload:
+        return {"error": "cpuLimitPercent required"}, 400
+    try:
+        percent = int(payload["cpuLimitPercent"])
+    except (TypeError, ValueError):
+        return {"error": "cpuLimitPercent must be an integer"}, 400
+    percent = max(0, min(percent, 100))
+
+    data = _read_server_config_raw()
+    data["cpuLimitPercent"] = percent
+    try:
+        _atomic_write_json(SERVER_CONFIG_PATH, data)
+    except OSError:
+        return {"error": "could not write server config"}, 500
+
+    effective = cpu_limiter.resolve_limit_percent(SERVER_CONFIG_PATH)
+    applied = cpu_limiter.set_cpu_limit(effective)
+    return {
+        "cpuLimitPercent": percent,
+        "effectivePercent": effective or 0,
+        "applied": bool(applied),
+        "envOverride": os.environ.get("KANBAN_CPU_LIMIT") is not None,
+    }, 200
+
+
 # --- Task 7: Activity, kill, answer -----------------------------------------
 
 def orch_activity():
@@ -1734,6 +1797,8 @@ class KanbanHandler(BaseHTTPRequestHandler):
             self._json(*profile_get(name))
         elif path == "/api/orchestrator/state":
             self._json(*orch_state_get())
+        elif path == "/api/server/config":
+            self._json(*server_config_get())
         elif path == "/api/orchestrator/activity":
             self._json(*orch_activity())
         elif path == "/api/performance":
@@ -1786,6 +1851,11 @@ class KanbanHandler(BaseHTTPRequestHandler):
             if payload is None:
                 return
             self._json(*orch_state_put(payload))
+        elif len(parts) == 4 and parts[1] == "api" and parts[2] == "server" and parts[3] == "config":
+            payload = self._read_json()
+            if payload is None:
+                return
+            self._json(*server_config_put(payload))
         # PUT /api/board/<slug>/meta — edit board-level metadata
         elif len(parts) == 5 and parts[1] == "api" and parts[2] == "board" and parts[4] == "meta":
             slug = unquote(parts[3])

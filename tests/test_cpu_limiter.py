@@ -105,3 +105,57 @@ finally:
     )
     assert "self_in_job: True" in out.stdout, out.stderr
     assert "child_in_job: False" in out.stdout, out.stderr
+
+
+def test_set_cpu_limit_noop_off_windows(monkeypatch):
+    # No job handle + non-Windows -> nothing to do, reports False.
+    monkeypatch.setattr(cpu_limiter, "_job_handle", None)
+    monkeypatch.setattr(cpu_limiter.sys, "platform", "linux")
+    assert cpu_limiter.set_cpu_limit(10) is False
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows job objects only")
+def test_set_cpu_limit_live_updates_the_rate():
+    # In a throwaway child (so the runner is never capped): create the job via
+    # set_cpu_limit, then change the rate and disable it, reading the live
+    # CpuRate/ControlFlags back off the job each time to prove the kernel state
+    # actually changed without recreating the job.
+    code = """
+import ctypes, sys
+from ctypes import wintypes
+import cpu_limiter
+
+class RATE(ctypes.Structure):
+    _fields_ = [("ControlFlags", wintypes.DWORD), ("CpuRate", wintypes.DWORD)]
+
+k = ctypes.WinDLL("kernel32", use_last_error=True)
+k.QueryInformationJobObject.restype = wintypes.BOOL
+k.QueryInformationJobObject.argtypes = [
+    wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD,
+    ctypes.POINTER(wintypes.DWORD)]
+
+def rate():
+    info = RATE(); ret = wintypes.DWORD()
+    assert k.QueryInformationJobObject(
+        cpu_limiter._job_handle, 15, ctypes.byref(info), ctypes.sizeof(info),
+        ctypes.byref(ret))
+    return info.ControlFlags, info.CpuRate
+
+assert cpu_limiter._job_handle is None
+assert cpu_limiter.set_cpu_limit(50)   # creates the job (no handle yet)
+print("create:", rate())               # (5, 5000)  enable|hardcap, 50%
+assert cpu_limiter.set_cpu_limit(20)   # live update on the existing job
+print("update:", rate())               # (5, 2000)
+assert cpu_limiter.set_cpu_limit(0)    # disable rate control, stay in job
+print("disable:", rate())              # (0, 0)
+"""
+    out = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=APP_DIR,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert "create: (5, 5000)" in out.stdout, out.stderr
+    assert "update: (5, 2000)" in out.stdout, out.stderr
+    assert "disable: (0, 0)" in out.stdout, out.stderr

@@ -186,3 +186,67 @@ def apply_cpu_limit(percent):
 
     _job_handle = job
     return True
+
+
+def set_cpu_limit(percent):
+    """Adjust the live CPU cap without restarting the server.
+
+    Unlike `apply_cpu_limit` (which is idempotent and only ever creates the job
+    once), this re-writes the rate-control info on the *existing* job so a cap
+    changed from the UI takes effect immediately. Semantics:
+
+    - No job yet (cap was disabled at boot, or first call): delegate to
+      `apply_cpu_limit`, which creates the job — so enabling a cap live works too.
+    - Job exists, `percent` truthy: re-set the hard cap to the new rate.
+    - Job exists, `percent` falsy (0/None): clear the rate control so the process
+      runs uncapped (the process stays assigned to the job; only throttling is off).
+
+    Returns True if the requested state is in place, False on any failure or a
+    non-Windows platform.
+    """
+    global _job_handle
+    if sys.platform != "win32":
+        return False
+    if _job_handle is None:
+        # Nothing capped yet — create the job (only possible when enabling).
+        return apply_cpu_limit(percent)
+
+    import ctypes
+    from ctypes import wintypes
+
+    JobObjectCpuRateControlInformation = 15
+    JOB_OBJECT_CPU_RATE_CONTROL_ENABLE = 0x1
+    JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP = 0x4
+
+    class JOBOBJECT_CPU_RATE_CONTROL_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("ControlFlags", wintypes.DWORD),
+            ("CpuRate", wintypes.DWORD),  # 1/100ths of a percent of total CPU
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.SetInformationJobObject.restype = wintypes.BOOL
+    kernel32.SetInformationJobObject.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    ]
+
+    if percent:
+        info = JOBOBJECT_CPU_RATE_CONTROL_INFORMATION(
+            ControlFlags=JOB_OBJECT_CPU_RATE_CONTROL_ENABLE
+            | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP,
+            CpuRate=min(int(percent), 100) * 100,
+        )
+    else:
+        # ControlFlags=0 disables rate control entirely -> uncapped.
+        info = JOBOBJECT_CPU_RATE_CONTROL_INFORMATION(ControlFlags=0, CpuRate=0)
+
+    ok = kernel32.SetInformationJobObject(
+        _job_handle,
+        JobObjectCpuRateControlInformation,
+        ctypes.byref(info),
+        ctypes.sizeof(info),
+    )
+    return bool(ok)

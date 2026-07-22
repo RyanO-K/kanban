@@ -1584,9 +1584,10 @@ document.querySelectorAll(".view-tab").forEach(b=>b.addEventListener("click",()=
 async function renderProfiles(){
   const wrap = $("view-profiles");
   wrap.innerHTML = "<div style='color:#64748b'>Loading…</div>";
-  let profiles=[], state={};
+  let profiles=[], state={}, serverCfg={};
   try{ profiles = (await apiFetch("/api/profiles")).profiles||[]; }catch(e){}
   try{ state = await apiFetch("/api/orchestrator/state"); }catch(e){}
+  try{ serverCfg = await apiFetch("/api/server/config"); }catch(e){}
   let html = '<p class="setup-section">Concurrency</p>';
   html += '<div class="setup-grid">';
   html += '<div class="setup-field"><label>Max agents in flight</label>'
@@ -1605,6 +1606,20 @@ async function renderProfiles(){
         + '<input type="number" id="triageTimeoutSecondsInput" min="30" max="600" value="'+(state.triageTimeoutSeconds??120)+'">'
         + '<button class="add-btn" id="triageTimeoutSecondsSave">Save</button></div>';
   html += '</div>';
+  html += '<hr class="setup-divider">';
+  html += '<p class="setup-section">Server CPU cap</p>';
+  html += '<div style="color:var(--text-muted);font-size:11px;margin-bottom:10px;max-width:520px;">'
+        + 'Kernel hard cap on the server process (percent of total system CPU across all cores). '
+        + '0 disables the cap. Applies live — no restart needed. Dispatched agents run uncapped.</div>';
+  html += '<div class="setup-grid">';
+  html += '<div class="setup-field"><label>CPU limit (%)</label>'
+        + '<input type="number" id="cpuLimitInput" min="0" max="100" value="'+(serverCfg.cpuLimitPercent??serverCfg.effectivePercent??5)+'">'
+        + '<button class="add-btn" id="cpuLimitSave">Save</button></div>';
+  html += '</div>';
+  if(serverCfg.envOverride){
+    html += '<div style="color:var(--warn,#f59e0b);font-size:11px;margin:-8px 0 12px;max-width:520px;">'
+          + 'KANBAN_CPU_LIMIT is set in the environment and overrides this value — your edit is saved but the env var wins until it is unset.</div>';
+  }
   html += '<hr class="setup-divider">';
   html += '<p class="setup-section">Loop models</p>';
   html += '<div style="color:var(--text-muted);font-size:11px;margin-bottom:10px;max-width:520px;">'
@@ -1650,6 +1665,12 @@ async function renderProfiles(){
       body:JSON.stringify({triageTimeoutSeconds:parseInt($("triageTimeoutSecondsInput").value,10)||120})});
     showToast("LLM timeout saved");}
     catch(e){showToast("Failed to save LLM timeout",true);}
+  });
+  $("cpuLimitSave").addEventListener("click", async ()=>{
+    try{const r=await apiFetch("/api/server/config",{method:"PUT",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({cpuLimitPercent:parseInt($("cpuLimitInput").value,10)||0})});
+    showToast(r.applied?("CPU cap set to "+r.effectivePercent+"%"):"CPU cap saved (applies on restart)");}
+    catch(e){showToast("Failed to save CPU cap",true);}
   });
   $("triageModelSave").addEventListener("click", async ()=>{
     try{await apiFetch("/api/orchestrator/state",{method:"PUT",headers:{"Content-Type":"application/json"},
