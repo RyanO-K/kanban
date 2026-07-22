@@ -1183,23 +1183,54 @@ def _deps_of(task):
     return deps
 
 
+def _has_model(task):
+    """True if `task` carries a real (non-empty, non-whitespace) model."""
+    return bool((task.get("model") or "").strip())
+
+
 def promotable_tickets(tasks):
     """Tickets currently in `todo` whose dependencies are all met.
 
-    These are ready to start work but not yet queued, so the tick loop promotes
-    them to `ready`. Dependency resolution is per-board, mirroring eligibility.
-    Tickets without a real model specified are not promotable (ticket #100).
+    These are candidates for triage-then-promote: the tick loop runs initial
+    triage on each (to assign a model / dependsOn) and then promotes it to
+    `ready`. Dependency resolution is per-board, mirroring eligibility.
+
+    No-model tickets ARE returned here (ticket #108): initial triage is the step
+    that assigns the model, so a no-model todo ticket must reach it — filtering it
+    out (as ticket #100 did) left it stuck in todo forever. The invariant that
+    nothing enters `ready` without a model now lives in the promotion step: see
+    `apply_initial_triage`, which reports whether a triaged ticket may go `ready`.
     """
     dep_met = _dep_met_fn(tasks)
     out = []
     for t in tasks:
         if t.get("status") != "todo":
             continue
-        if not (t.get("model") or "").strip():
-            continue
         if all(dep_met(t.get("_board"), d) for d in _deps_of(t)):
             out.append(t)
     return out
+
+
+def apply_initial_triage(task, triage):
+    """Merge an initial-triage result into a todo `task`; report if it may go ready.
+
+    Triage (Sonnet) may suggest a `model` and a `dependsOn` list. Neither clobbers
+    a value the user already set:
+      - `model` is filled only when the task has no real model yet — a user-pinned
+        model (from the ticket UI picklist) always wins (ticket #108). This also
+        upholds ticket #100's invariant that a task only leaves `todo` once it has
+        a model.
+      - `dependsOn` is filled only when the task has none yet.
+
+    Mutates `task` in place. Returns True when the task has a real model afterwards
+    (safe to promote to `ready`), False when it still has none (leave in `todo`).
+    """
+    triage = triage or {}
+    if not _has_model(task) and (triage.get("model") or "").strip():
+        task["model"] = triage["model"]
+    if not _deps_of(task) and triage.get("dependsOn"):
+        task["dependsOn"] = triage["dependsOn"]
+    return _has_model(task)
 
 
 def eligible_tickets(tasks):

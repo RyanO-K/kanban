@@ -1871,15 +1871,25 @@ def tick(kanban_dir, *, opus_triage, summarize_progress=None, initial_triage=Non
     for t in promotable:
         # Run initial triage (Sonnet) to fill in dependsOn and model before
         # the ticket enters the Ready queue. Failures are swallowed so a
-        # Sonnet outage never blocks promotion.
+        # Sonnet outage never blocks promotion of tickets that already have a model.
         try:
             triage = initial_triage(kanban_dir, t, tasks) or {}
         except Exception:
             triage = {}
-        if "dependsOn" in triage:
-            t["dependsOn"] = triage["dependsOn"]
-        if "model" in triage:
-            t["model"] = triage["model"]
+        # Merge triage without clobbering a user-pinned model/deps (ticket #108).
+        # A ticket enters `ready` only once it has a real model (ticket #100's
+        # invariant); if triage produced none, leave it in `todo` and log the
+        # failure so it is visible instead of silently stuck (ticket #108 — the
+        # no-model deadlock this fixes).
+        if not oc.apply_initial_triage(t, triage):
+            write_task(t["_path"], t)
+            oc.append_activity(kanban_dir, {
+                "ts": oc.now_iso(), "kind": "triage_no_model",
+                "board": t["_board"], "ticket": t["id"],
+                "message": ("initial triage assigned no model; leaving ticket in "
+                            "todo. Set a model via the ticket picklist or retry."),
+            })
+            continue
         _add_history(t, t.get("status"), "ready")
         t["status"] = "ready"
         write_task(t["_path"], t)
