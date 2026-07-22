@@ -17,6 +17,7 @@ import json
 import os
 import re
 import secrets
+import subprocess
 import sys
 import threading
 import time
@@ -1191,7 +1192,20 @@ def server_restart():
     stop_orchestrator()  # release single-instance lock for the new image
 
     def _reexec():
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+        # On Windows os.execv rebuilds the child's command line WITHOUT quoting
+        # its arguments, so an interpreter path containing a space — the default
+        # "C:\Program Files\Python312\python.exe" — is split at the space and the
+        # restart dies with `C:\Program: can't open file ...`. That silently
+        # kills the server (and its orchestrator loop) instead of restarting it.
+        # Spawn a fresh process there instead (Popen quotes argv correctly via
+        # CreateProcess) and exit this one; HTTPServer sets allow_reuse_address so
+        # the child rebinds the port while this socket is still closing. POSIX
+        # keeps the clean in-place execv (same PID, no rebind race).
+        if sys.platform == "win32":
+            subprocess.Popen([sys.executable] + sys.argv)
+            os._exit(0)
+        else:
+            os.execv(sys.executable, [sys.executable] + sys.argv)
 
     threading.Timer(0.3, _reexec).start()
     return {"ok": True}, 200
