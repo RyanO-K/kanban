@@ -249,19 +249,26 @@ async function loadFiles(){
 
 async function poll(){
   if(!currentFile)return;
+  // Capture the board this request is FOR. If the user switches boards while the
+  // response is in flight, the stale payload must not be rendered or cached under
+  // the new board's key — with the ?since= short-circuit an __all__ payload cached
+  // as a concrete board sticks (its mtime matches, so every later poll returns
+  // {"unchanged": true} and the wrong render is never corrected).
+  const file=currentFile;
   try{
     const since=lastMtime?"?since="+encodeURIComponent(lastMtime):"";
-    const data=await apiFetch("/api/board/"+encodeURIComponent(currentFile)+since);
+    const data=await apiFetch("/api/board/"+encodeURIComponent(file)+since);
+    if(file!==currentFile)return; // board switched mid-flight; drop the stale response
     if(!data.unchanged){
       currentBoardData=data;
       // Ticket #99: keep the cache warm so switching back to this board is instant.
-      boardCache[currentFile]={data,fetchedAt:Date.now()};
+      boardCache[file]={data,fetchedAt:Date.now()};
       if(data.mtime!==lastMtime){lastMtime=data.mtime;currentTasks=data.tasks||[];renderBoard(data);if(selectedTaskKey)refreshPanel();}
     }
     pillState.lastUpdated="Updated "+new Date().toLocaleTimeString();
     setServerDown(false);
     checkOrchStatus();
-  }catch(e){setServerDown(true);}
+  }catch(e){if(file===currentFile)setServerDown(true);}
 }
 // Ticket #99: startPolling optionally accepts cached board data so we can render
 // instantly on a board switch without waiting for a network round-trip. When
