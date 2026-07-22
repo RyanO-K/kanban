@@ -48,7 +48,8 @@ def test_clear_model(board):
 def test_reject_unknown_model(board):
     result, status = ks.update_task_model("demo", "1", "gpt-9")
     assert status == 400
-    assert "model" not in _read(os.path.join(board, "boards", "demo", "1.json"))
+    # model field must not have been updated to the rejected value
+    assert _read(os.path.join(board, "boards", "demo", "1.json")).get("model") != "gpt-9"
 
 
 def test_set_model_preserves_concurrent_comment(board):

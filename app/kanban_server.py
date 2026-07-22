@@ -187,6 +187,7 @@ DEFAULT_MODELS = [
     {"value": "claude-haiku-4-5-20251001", "label": "Haiku (small)"},
     {"value": "claude-sonnet-4-6", "label": "Sonnet (medium)"},
     {"value": "claude-opus-4-8", "label": "Opus (large)"},
+    {"value": "claude-fable-5", "label": "Fable 5"},
 ]
 
 MODELS_API_URL = "https://api.anthropic.com/v1/models"
@@ -204,7 +205,8 @@ def discover_models(api_key=None, url=None, timeout=MODELS_API_TIMEOUT, opener=N
     sorted by id for a stable picklist order.
     """
     if api_key is None:
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        api_key = (os.environ.get("ANTHROPIC_API_KEY")
+                   or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
     if not api_key:
         return list(DEFAULT_MODELS)
 

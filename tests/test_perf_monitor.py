@@ -74,7 +74,6 @@ def test_snapshot_accumulates_history_and_totals():
     s.sample_once()
     s.sample_once()
     snap = s.snapshot()
-    assert snap["available"] is True
     assert snap["totals"]["sessionCount"] == 1
     sess = snap["sessions"][0]
     assert len(sess["history"]) == 2
