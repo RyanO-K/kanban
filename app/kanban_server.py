@@ -1997,6 +1997,19 @@ class KanbanHandler(BaseHTTPRequestHandler):
 
 
 def main():
+    # Kernel-level CPU cap (Windows Job Object hard cap) on the server process
+    # only — the orchestrator tick loop and perf sampler are threads in this
+    # process and share the cap; child processes (dispatched agents, git)
+    # break away from the job at spawn and run uncapped. See cpu_limiter.py
+    # for the KANBAN_CPU_LIMIT / cpuLimitPercent resolution rules.
+    import cpu_limiter
+
+    cpu_pct = cpu_limiter.resolve_limit_percent(SERVER_CONFIG_PATH)
+    if cpu_limiter.apply_cpu_limit(cpu_pct):
+        print(f"CPU hard-capped at {cpu_pct}% of total system CPU (kernel job object)")
+    elif cpu_pct:
+        print(f"WARNING: could not apply {cpu_pct}% CPU cap; running uncapped")
+
     cfg = load_server_config()
     # Precedence, most explicit wins:
     #   host: KANBAN_HOST env  >  server.json  >  built-in loopback default

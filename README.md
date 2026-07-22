@@ -101,6 +101,27 @@ Defaults:
 - **host**: Loopback (`127.0.0.1`) — set to `0.0.0.0` for network access
 - **port**: `8745`
 
+### CPU Limit (Windows)
+
+On Windows the server hard-caps its own CPU at the kernel level (a Job Object
+with `JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP`). The cap covers the server process
+only — including the orchestrator tick loop and perf sampler threads inside it.
+Child processes (dispatched agents, git commands) break away from the job at
+spawn and run uncapped.
+
+Default is **5%** of total system CPU. Override via `.kanban/_orchestrator/server.json`:
+
+```json
+{
+  "cpuLimitPercent": 30
+}
+```
+
+or the `KANBAN_CPU_LIMIT` env var (takes precedence). Set `0` to disable.
+The percentage is of *all* cores combined — 5% on an 8-core machine allows
+the equivalent of 0.4 cores. Non-Windows platforms are unaffected (use
+cgroups / systemd `CPUQuota=` there).
+
 ### Orchestrator Settings
 
 Configure in the UI's **Orchestrator** tab or edit `.kanban/_orchestrator/state.json`:

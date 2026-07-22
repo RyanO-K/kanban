@@ -85,6 +85,16 @@ ignored. Precedence, most explicit first:
 Bind to loopback unless you deliberately need LAN exposure — the API exposes
 destructive endpoints (perf kill, server restart, DELETE task).
 
+### CPU cap
+
+On Windows the server assigns itself to a kernel Job Object with a hard CPU
+rate cap (`app/cpu_limiter.py`). The cap applies to the server process only —
+the orchestrator loop and perf sampler run as threads inside it and share the
+cap, but child processes (dispatched `claude` agents, git subprocesses) break
+away from the job at spawn (`JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK`) and run
+uncapped. Default 5% of total system CPU; resolved as `KANBAN_CPU_LIMIT` env
+> `server.json` `cpuLimitPercent` > default, `0` disables.
+
 ---
 
 ## Conventions
