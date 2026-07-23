@@ -104,3 +104,37 @@ def test_write_succeeds_alongside_concurrent_disk_activity(board):
 
     assert status == 200
     assert _read(p)["title"] == "Updated Title"
+
+
+# --- mergeBranch field (ticket #109) ----------------------------------------
+
+def test_set_merge_branch(board):
+    p = os.path.join(board, "boards", "demo", "1.json")
+    result, status = ks.update_task_fields("demo", "1", None, None, "release-v2")
+    assert status == 200
+    assert _read(p)["mergeBranch"] == "release-v2"
+
+
+def test_clear_merge_branch(board):
+    p = os.path.join(board, "boards", "demo", "1.json")
+    ks.update_task_fields("demo", "1", None, None, "main")
+    result, status = ks.update_task_fields("demo", "1", None, None, "")
+    assert status == 200
+    assert "mergeBranch" not in _read(p)
+
+
+def test_merge_branch_stripped(board):
+    p = os.path.join(board, "boards", "demo", "1.json")
+    result, status = ks.update_task_fields("demo", "1", None, None, "  feature/foo  ")
+    assert status == 200
+    assert _read(p)["mergeBranch"] == "feature/foo"
+
+
+def test_merge_branch_independent_of_other_fields(board):
+    p = os.path.join(board, "boards", "demo", "1.json")
+    ks.update_task_fields("demo", "1", "Keep Title", None, None)
+    result, status = ks.update_task_fields("demo", "1", None, None, "main")
+    assert status == 200
+    t = _read(p)
+    assert t["title"] == "Keep Title"
+    assert t["mergeBranch"] == "main"

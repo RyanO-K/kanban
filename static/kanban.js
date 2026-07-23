@@ -463,18 +463,23 @@ function refreshPanel(){
   // edit — that wipes the user's unsaved description/title text. Skip this poll's
   // re-render; the next poll after they save/cancel picks up server changes.
   if(panelHasOpenEdit())return;
-  // Preserve comment draft across re-renders
-  const draftMsg=$("spCMsg"),draftWriter=$("spCWriter");
+  // Preserve comment draft and branch input across re-renders
+  const draftMsg=$("spCMsg"),draftWriter=$("spCWriter"),draftBranch=$("spBranchInput");
   const savedMsg=draftMsg?draftMsg.value:"",savedWriter=draftWriter?draftWriter.value:"";
-  const wasFocused=document.activeElement===draftMsg||document.activeElement===draftWriter;
+  const savedBranch=draftBranch?draftBranch.value:null;
+  const wasFocused=document.activeElement===draftMsg||document.activeElement===draftWriter||document.activeElement===draftBranch;
   const focusedId=wasFocused?document.activeElement.id:null;
   renderPanel(t);
   if(savedMsg||savedWriter){
     const newMsg=$("spCMsg"),newWriter=$("spCWriter");
     if(newMsg)newMsg.value=savedMsg;
     if(newWriter)newWriter.value=savedWriter;
-    if(focusedId)$(focusedId).focus();
   }
+  if(savedBranch!==null){
+    const newBranch=$("spBranchInput");
+    if(newBranch)newBranch.value=savedBranch;
+  }
+  if(focusedId)$(focusedId).focus();
 }
 // ── Live logs poll ──────────────────────────────────────────────────────
 // A single active poll at a time. `logPoll.openKey` remembers which task's log
@@ -779,6 +784,18 @@ function renderPanel(task){
   if(task.claudeSessionId) html+='<div class="sp-field"><div class="sp-field-label">Claude Session</div><div class="sp-field-value sp-session-row"><code class="sp-session-id">'+esc(task.claudeSessionId)+'</code><button type="button" class="sp-copy-btn" id="spCopySession" title="Copy resume command">Copy resume cmd</button></div></div>';
   html+='<div class="sp-field" id="spDetailField"><div class="sp-field-label">Description <button type="button" class="sp-copy-btn sp-edit-detail-btn" id="spEditDetailBtn" title="Edit description" style="padding:2px 6px;margin-left:4px;">&#x270E;</button></div>'+(task.detail?'<div class="sp-detail" id="spDetailView">'+esc(task.detail)+'</div>':'<div class="sp-detail sp-detail-empty" id="spDetailView" style="color:var(--text-muted);font-style:italic;">No description</div>')+'</div>';
 
+  // Merge branch field — only when the board has showMergeBranch enabled.
+  const showMergeBranch=!!(currentBoardData&&currentBoardData.showMergeBranch);
+  if(showMergeBranch){
+    const isDone=task._column==="done";
+    const hasBranch=!!(task.mergeBranch&&task.mergeBranch.trim());
+    if(isDone&&hasBranch){
+      html+='<div class="sp-merge-banner">&#x26A1; Merge into <strong>'+esc(task.mergeBranch)+'</strong></div>';
+    }
+    html+='<div class="sp-field"><div class="sp-field-label">Branch</div>'
+      +'<input type="text" class="form-input sp-branch-input" id="spBranchInput" value="'+esc(task.mergeBranch||'')+'" placeholder="e.g. main, release-v2" style="font-size:12px;padding:4px 8px;"></div>';
+  }
+
   const deps=task.dependsOn?(Array.isArray(task.dependsOn)?task.dependsOn:[task.dependsOn]):[];
   if(deps.length||task.optional){
     html+='<div class="sp-field"><div class="sp-field-label">Tags</div><div class="sp-tags">';
@@ -904,6 +921,26 @@ function renderPanel(task){
   // Title edit button
   const titleEditBtn=$("spTitleEditBtn");
   if(titleEditBtn) titleEditBtn.addEventListener("click",()=>startTitleEdit(task,srcFile));
+
+  // Branch input: save on blur or Enter
+  const branchInput=$("spBranchInput");
+  if(branchInput){
+    let branchSaved=branchInput.value;
+    const saveBranch=async()=>{
+      const val=branchInput.value.trim();
+      if(val===branchSaved)return;
+      try{
+        await updateTaskFields(srcFile,String(task.id),{mergeBranch:val});
+        task.mergeBranch=val||undefined;
+        branchSaved=val;
+      }catch(e){}
+    };
+    branchInput.addEventListener("blur",saveBranch);
+    branchInput.addEventListener("keydown",e=>{
+      if(e.key==="Enter"){e.preventDefault();branchInput.blur();}
+      else if(e.key==="Escape"){branchInput.value=branchSaved;branchInput.blur();}
+    });
+  }
 
   // Description inline edit
   const editDetailBtn=$("spEditDetailBtn");
@@ -1534,6 +1571,7 @@ function openBoardModal(){
   $("bUseWorktrees").checked=d.useWorktrees===true;
   $("bUseDocker").checked=d.useDocker===true;
   $("bContainerSettings").style.display=d.useDocker===true?"":"none";
+  $("bShowMergeBranch").checked=d.showMergeBranch===true;
   $("bEnvVars").value=envMapToText(d.envVars);
   $("bPassthroughEnv").value=namesToText(d.passthroughEnv);
   $("boardModal").classList.add("open");
@@ -1548,7 +1586,7 @@ $("boardModal").addEventListener("click",e=>{if(e.target===$("boardModal"))close
 $("boardForm").addEventListener("submit",async e=>{
   e.preventDefault();
   if(!currentFile||currentFile==="__all__")return;
-  const payload={project:$("bProject").value.trim(),directory:$("bDirectory").value.trim(),description:$("bDescription").value.trim(),commitRequirements:$("bCommitReq").value.trim(),useWorktrees:$("bUseWorktrees").checked,useDocker:$("bUseDocker").checked,envVars:envTextToMap($("bEnvVars").value),passthroughEnv:textToNames($("bPassthroughEnv").value)};
+  const payload={project:$("bProject").value.trim(),directory:$("bDirectory").value.trim(),description:$("bDescription").value.trim(),commitRequirements:$("bCommitReq").value.trim(),useWorktrees:$("bUseWorktrees").checked,useDocker:$("bUseDocker").checked,envVars:envTextToMap($("bEnvVars").value),passthroughEnv:textToNames($("bPassthroughEnv").value),showMergeBranch:$("bShowMergeBranch").checked};
   try{
     await apiFetch("/api/board/"+encodeURIComponent(currentFile)+"/meta",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
     showToast("Project settings saved");closeBoardModal();lastMtime=0;loadFiles();poll();
