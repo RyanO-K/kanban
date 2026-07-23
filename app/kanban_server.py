@@ -634,7 +634,7 @@ def load_board(slug):
     # Pass through optional board-level metadata if present.
     for key in ("context", "openQuestions", "outOfScope", "commitRequirements",
                 "directory", "useWorktrees", "useDocker", "envVars",
-                "passthroughEnv"):
+                "passthroughEnv", "showMergeBranch"):
         if key in meta:
             result[key] = meta[key]
     # Surface the one-paragraph context blurb as a flat field for the settings
@@ -701,7 +701,7 @@ def board_get(slug, since=None):
 # are sanitized specially (a dict / a list of names, not a scalar) just below.
 EDITABLE_META_FIELDS = ("project", "context", "openQuestions", "outOfScope",
                         "commitRequirements", "directory", "useWorktrees",
-                        "useDocker", "envVars", "passthroughEnv")
+                        "useDocker", "envVars", "passthroughEnv", "showMergeBranch")
 
 
 def update_board_meta(slug, payload):
@@ -958,8 +958,8 @@ def update_task_model(slug, task_id, model):
     return {"ok": True, "taskId": task_id, "model": model}, 200
 
 
-def update_task_fields(slug, task_id, title, detail):
-    """Update a ticket's title and/or detail text. Either may be None to leave unchanged.
+def update_task_fields(slug, task_id, title, detail, merge_branch=None):
+    """Update a ticket's title, detail text, and/or mergeBranch. Any may be None to leave unchanged.
     Follows the re-read-before-write pattern so concurrent writes aren't clobbered."""
     path, _ = board_dir(slug)
     if path is None or not is_board(path):
@@ -985,6 +985,11 @@ def update_task_fields(slug, task_id, title, detail):
             task["detail"] = detail.strip()
         else:
             task.pop("detail", None)
+    if merge_branch is not None:
+        if merge_branch.strip():
+            task["mergeBranch"] = merge_branch.strip()
+        else:
+            task.pop("mergeBranch", None)
 
     try:
         write_ticket(tp, task)
@@ -1897,11 +1902,12 @@ class KanbanHandler(BaseHTTPRequestHandler):
                 result, status = update_task_model(slug, task_id, payload.get("model", ""))
             elif "order" in payload:
                 result, status = update_task_order(slug, task_id, payload.get("order"))
-            elif "title" in payload or "detail" in payload:
+            elif "title" in payload or "detail" in payload or "mergeBranch" in payload:
                 result, status = update_task_fields(
                     slug, task_id,
                     payload.get("title"),
                     payload.get("detail"),
+                    payload.get("mergeBranch"),
                 )
             else:
                 result, status = update_task_status(slug, task_id, payload.get("column", ""))
