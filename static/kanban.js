@@ -1989,6 +1989,7 @@ async function renderOrchestrator(){
 function questionCard(t){
   const q=t.orchestrator.question;
   const card=document.createElement("div");
+  card.dataset.qkey=t._board+":"+t.id;
   card.style.cssText="background:var(--surface);border-left:3px solid #ef4444;border-radius:6px;padding:12px;margin-bottom:10px;";
   card.innerHTML='<div style="font-weight:600;">#'+esc(t.id)+' '+esc(t.title)+'</div>'
     +'<div style="margin:6px 0;color:var(--text-muted);font-size:13px;">'+esc(q.prompt)+'</div>';
@@ -2041,7 +2042,54 @@ async function refreshAttention(){
   catch(e){ return; }  // server down — keep last-known count; the status pill shows offline
   attentionTasks=(all.tasks||[]).filter(t=>t.orchestrator&&t.orchestrator.question&&!t.orchestrator.question.answer);
   updateBell();
-  if($("bellModal").classList.contains("open")) renderBellInbox();
+  // Only rebuild the open modal when the question set actually changed — an
+  // unconditional rebuild every poll tick wiped the user's half-typed answer.
+  if($("bellModal").classList.contains("open") && attentionSig()!==_bellRenderedSig) renderBellInbox();
+}
+
+// Identity of the rendered question set: which tickets are asking, and what.
+// Anything not captured here (e.g. ticket title) won't trigger a live rebuild.
+function attentionSig(){
+  return attentionTasks.map(t=>{
+    const q=t.orchestrator.question;
+    return JSON.stringify([t._board,t.id,q.type,q.multi?1:0,q.prompt,q.options||[]]);
+  }).join("\n");
+}
+let _bellRenderedSig=null;
+
+// Draft answers survive a rebuild: capture per-card input/notes/choices (+focus
+// and caret) keyed by board:id, and put them back on the recreated cards.
+function saveBellDrafts(inbox){
+  const drafts={};
+  inbox.querySelectorAll("[data-qkey]").forEach(card=>{
+    const s={checked:[...card.querySelectorAll("input:checked")].map(i=>i.value)};
+    const inp=card.querySelector("input.form-input"); if(inp) s.value=inp.value;
+    const notes=card.querySelector("textarea"); if(notes) s.notes=notes.value;
+    const ae=document.activeElement;
+    if(card.contains(ae)&&(ae===inp||ae===notes)){
+      s.focus=(ae===notes)?"notes":"input";
+      if(typeof ae.selectionStart==="number"){ s.selStart=ae.selectionStart; s.selEnd=ae.selectionEnd; }
+    }
+    drafts[card.dataset.qkey]=s;
+  });
+  return drafts;
+}
+function restoreBellDrafts(inbox,drafts){
+  inbox.querySelectorAll("[data-qkey]").forEach(card=>{
+    const s=drafts[card.dataset.qkey]; if(!s) return;
+    (s.checked||[]).forEach(v=>{
+      const opt=[...card.querySelectorAll('input[type=radio],input[type=checkbox]')].find(i=>i.value===v);
+      if(opt) opt.checked=true;
+    });
+    const inp=card.querySelector("input.form-input"); if(inp&&s.value!==undefined) inp.value=s.value;
+    const notes=card.querySelector("textarea"); if(notes&&s.notes!==undefined) notes.value=s.notes;
+    const target=s.focus==="notes"?notes:(s.focus==="input"?inp:null);
+    if(target){
+      target.focus();
+      // number inputs throw on setSelectionRange
+      if(typeof s.selStart==="number") try{ target.setSelectionRange(s.selStart,s.selEnd); }catch(e){}
+    }
+  });
 }
 
 function updateBell(){
@@ -2064,12 +2112,15 @@ function updateBell(){
 function renderBellInbox(){
   const inbox=$("bellInbox");
   if(!inbox) return;
+  const drafts=saveBellDrafts(inbox);
   inbox.innerHTML="";
+  _bellRenderedSig=attentionSig();
   if(!attentionTasks.length){
     inbox.innerHTML='<div style="color:var(--text-muted);font-size:13px;text-align:center;padding:28px 12px;">&#x2713; All caught up — nothing needs your input.</div>';
     return;
   }
   attentionTasks.forEach(t=>inbox.appendChild(questionCard(t)));
+  restoreBellDrafts(inbox,drafts);
 }
 
 function openBellModal(){ renderBellInbox(); $("bellModal").classList.add("open"); }
