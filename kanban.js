@@ -377,6 +377,7 @@ function closePanel(){
   if(dockMode){undock();return;} // panel is showing the docked Create Task form
   hideToolResult(); // a bubble portaled to <body> must not outlive the panel
   stopLogPoll();logPoll.openKey=null;
+  stopChatPoll();
   selectedTaskKey=null;
   $("sidePanel").classList.remove("open");
   $("board").classList.remove("panel-open");
@@ -385,17 +386,23 @@ function closePanel(){
 function refreshPanel(){
   const t=currentTasks.find(x=>taskKey(x)===selectedTaskKey);
   if(!t){closePanel();return;}
-  // Preserve comment draft across re-renders
+  // Preserve comment + chat drafts across re-renders
   const draftMsg=$("spCMsg"),draftWriter=$("spCWriter");
+  const chatMsg=$("spChatMsg"),chatWriter=$("spChatWriter");
   const savedMsg=draftMsg?draftMsg.value:"",savedWriter=draftWriter?draftWriter.value:"";
-  const wasFocused=document.activeElement===draftMsg||document.activeElement===draftWriter;
+  const savedChat=chatMsg?chatMsg.value:"",savedChatWriter=chatWriter?chatWriter.value:"";
+  const wasFocused=document.activeElement===draftMsg||document.activeElement===draftWriter||
+                   document.activeElement===chatMsg||document.activeElement===chatWriter;
   const focusedId=wasFocused?document.activeElement.id:null;
   renderPanel(t);
-  if(savedMsg||savedWriter){
+  if(savedMsg||savedWriter||savedChat||savedChatWriter){
     const newMsg=$("spCMsg"),newWriter=$("spCWriter");
     if(newMsg)newMsg.value=savedMsg;
     if(newWriter)newWriter.value=savedWriter;
-    if(focusedId)$(focusedId).focus();
+    const newChat=$("spChatMsg"),newChatWriter=$("spChatWriter");
+    if(newChat)newChat.value=savedChat;
+    if(newChatWriter&&savedChatWriter)newChatWriter.value=savedChatWriter;
+    if(focusedId&&$(focusedId))$(focusedId).focus();
   }
 }
 // ── Live logs poll ──────────────────────────────────────────────────────
@@ -606,8 +613,69 @@ function bindLogToggle(task,srcFile){
   if(logPoll.openKey===key)open();
 }
 
+// ── Agent chat ("message the running bot") ──────────────────────────────
+// Messages POST into the run's server-side inbox; the orchestrator pump
+// delivers them at the agent's next turn boundary (never interrupting a turn
+// in progress). The panel polls the GET queue-status endpoint to show queued
+// vs delivered; guidance a run never received rides the ticket's pendingChat
+// into the next run's prompt ("queued for next run").
+const chatPoll={timer:null};
+function stopChatPoll(){ if(chatPoll.timer){clearInterval(chatPoll.timer);chatPoll.timer=null;} }
+function chatItem(m,state){
+  const cls=state==="delivered"?"delivered":(state==="queued"?"queued":"nextrun");
+  const label=state==="nextrun"?"queued for next run":state;
+  let ts="";
+  if(m.ts){const d=new Date(m.ts);if(!isNaN(d))ts=d.toLocaleTimeString();}
+  return '<div class="sp-chat-item"><div class="sp-chat-head"><span class="sp-chat-writer">'+esc(m.writer||"user")+'</span>'
+    +(ts?'<span class="sp-chat-time">'+esc(ts)+'</span>':'')
+    +'<span class="sp-chat-badge '+cls+'">'+label+'</span></div>'
+    +'<div class="sp-chat-msg">'+esc(m.message)+'</div></div>';
+}
+function renderChatList(data){
+  const box=$("spChatList");
+  if(!box)return;
+  let h="";
+  (data.nextRun||[]).forEach(m=>{h+=chatItem(m,"nextrun");});
+  (data.messages||[]).forEach(m=>{h+=chatItem(m,m.delivered?"delivered":"queued");});
+  if(!h)h='<div class="sp-chat-empty">No messages yet. The agent receives them at its next step — without being interrupted.</div>';
+  const nearBottom=box.scrollHeight-box.scrollTop-box.clientHeight<40;
+  box.innerHTML=h;
+  if(nearBottom)box.scrollTop=box.scrollHeight;
+}
+async function pollChat(board,taskId){
+  if(!$("spChatList"))return; // panel re-rendered/closed without our section
+  try{
+    const data=await apiFetch("/api/orchestrator/chat/"+encodeURIComponent(board)+"/"+encodeURIComponent(taskId));
+    if(!$("spChatList"))return; // closed mid-flight
+    renderChatList(data);
+    if(!data.running)stopChatPoll(); // agent finished — stop hammering
+  }catch(e){ /* transient; next tick retries */ }
+}
+function startChatPoll(board,taskId){
+  stopChatPoll();
+  pollChat(board,taskId);
+  chatPoll.timer=setInterval(()=>pollChat(board,taskId),2000);
+}
+async function sendChat(board,taskId){
+  const area=$("spChatMsg"),btn=$("spChatSend");
+  if(!area||!btn||btn.disabled)return;
+  const msg=area.value.trim();if(!msg)return;
+  const wEl=$("spChatWriter");
+  const writer=(wEl&&wEl.value.trim())||"user";
+  if(wEl&&wEl.value.trim())try{localStorage.setItem("kanbanChatWriter",wEl.value.trim());}catch(e){}
+  btn.disabled=true;area.disabled=true;
+  try{
+    await apiFetch("/api/orchestrator/chat/"+encodeURIComponent(board)+"/"+encodeURIComponent(taskId),
+      {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({message:msg,writer})});
+    area.value="";showToast("Queued for the agent");
+    pollChat(board,taskId);
+  }catch(e){showToast("Failed to send — the agent may have finished",true);}
+  btn.disabled=false;area.disabled=false;area.focus();
+}
+
 function renderPanel(task){
   stopLogPoll(); // clear any prior poll; bindLogToggle re-arms it if still open
+  stopChatPoll(); // chat section below re-arms it when the agent is live
   hideToolResult(); // a bubble portaled to <body> must not outlive its chip
   $("spTitle").textContent="#"+task.id+" "+task.title;
   const body=$("spBody");body.innerHTML="";
@@ -665,6 +733,26 @@ function renderPanel(task){
   });
   html+='<div class="sp-comment-form"><input type="text" id="spCWriter" placeholder="Your name"><textarea id="spCMsg" placeholder="Write a comment..."></textarea><button type="button" id="spCPost">Post Comment</button></div></div>';
 
+  // Message-agent section — chat with the RUNNING implementer (bot messaging).
+  // Messages queue server-side and are delivered at the agent's next turn
+  // boundary; guidance that misses the run rides pendingChat into the next
+  // one, so the section also shows when the agent is idle but guidance waits.
+  const agentLive=task.orchestrator&&task.orchestrator.state==="dispatched"&&task._column==="in_progress";
+  const hasNextRun=Array.isArray(task.pendingChat)&&task.pendingChat.length>0;
+  if(agentLive||hasNextRun){
+    html+='<div class="sp-section"><div class="sp-section-title">Message agent'+(agentLive?' <span class="sp-log-livebadge"><span class="sp-log-dot"></span>live</span>':'')+'</div>';
+    html+='<div class="sp-chat-list" id="spChatList"><div class="sp-chat-empty">Loading…</div></div>';
+    if(agentLive){
+      html+='<div class="sp-chat-form" id="spChatForm">'
+        +'<input type="text" id="spChatWriter" placeholder="Your name">'
+        +'<textarea id="spChatMsg" placeholder="Message the running agent — delivered at its next step, never interrupting mid-task."></textarea>'
+        +'<button type="button" id="spChatSend">Send to agent</button></div>';
+    }else{
+      html+='<div class="sp-chat-note">Agent not running — queued guidance will be injected into the next run\'s prompt.</div>';
+    }
+    html+='</div>';
+  }
+
   // Logs section — present whenever a sub-agent has been dispatched for this
   // ticket (it has an orchestrator run-log), and stays available after the
   // ticket is done so you can read back what the implementer did. Expands
@@ -675,7 +763,6 @@ function renderPanel(task){
   const hasLog=(task.orchestrator&&task.orchestrator.logFile)||task.runLogFile||
                (Array.isArray(task.completedLog)&&task.completedLog.length>0);
   if(hasLog){
-    const agentLive=task.orchestrator&&task.orchestrator.state==="dispatched"&&task._column==="in_progress";
     html+='<div class="sp-section"><div class="sp-section-title">Logs</div>';
     html+='<button type="button" class="sp-log-toggle" id="spLogToggle"><span class="sp-log-caret">▶</span><span>📡 Logs</span><span class="sp-log-spacer"></span>'+(agentLive?'<span class="sp-log-livebadge"><span class="sp-log-dot"></span>live</span>':'')+'</button>';
     html+='<div class="sp-log" id="spLog" style="display:none;"></div>';
@@ -726,6 +813,24 @@ function renderPanel(task){
       .catch(()=>showToast("Copy failed",true));
   });
   bindLogToggle(task,srcFile);
+
+  // Message-agent bindings: prefill the remembered name, send on click or
+  // Ctrl/Cmd+Enter, and poll the queue while the agent is live (one snapshot
+  // fetch when it isn't but pendingChat is waiting).
+  if($("spChatList")){
+    const chatSend=$("spChatSend");
+    if(chatSend){
+      const w=$("spChatWriter");
+      if(w&&!w.value){try{w.value=localStorage.getItem("kanbanChatWriter")||"";}catch(e){}}
+      chatSend.addEventListener("click",()=>sendChat(srcFile,String(task.id)));
+      $("spChatMsg").addEventListener("keydown",e=>{
+        if(e.key==="Enter"&&(e.ctrlKey||e.metaKey))sendChat(srcFile,String(task.id));
+      });
+      startChatPoll(srcFile,String(task.id));
+    }else{
+      pollChat(srcFile,String(task.id));
+    }
+  }
 
   // Spec rows: toggle inline preview; fetch + render markdown on first open.
   // The "Open ↗" link is a normal anchor (new tab) — stop it bubbling so the

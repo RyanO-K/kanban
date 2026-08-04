@@ -290,6 +290,30 @@ body {
 .sp-comment-form button:hover { background:#2563eb; }
 .sp-history-item { font-size:11px;color:var(--text-muted);margin-bottom:6px;padding-left:12px;border-left:2px solid var(--surface-alt); }
 .sp-history-time { font-size:10px;color:#64748b; }
+/* message-agent (bot chat) section */
+.sp-chat-list { display:flex;flex-direction:column;gap:6px;max-height:220px;overflow-y:auto;margin-bottom:8px; }
+.sp-chat-empty { font-size:11px;color:#475569;padding:2px; }
+.sp-chat-item { background:rgba(255,255,255,.02);border-left:2px solid #8b5cf6;border-radius:5px;padding:6px 9px; }
+.sp-chat-head { display:flex;align-items:center;gap:6px;margin-bottom:3px; }
+.sp-chat-writer { font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:#64748b; }
+.sp-chat-time { font-size:9px;color:#475569; }
+.sp-chat-badge { margin-left:auto;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;border-radius:8px;padding:1px 7px;white-space:nowrap; }
+.sp-chat-badge.queued { color:#f59e0b;border:1px solid rgba(245,158,11,.4); }
+.sp-chat-badge.delivered { color:#22c55e;border:1px solid rgba(34,197,94,.4); }
+.sp-chat-badge.nextrun { color:#8b5cf6;border:1px solid rgba(139,92,246,.4); }
+.sp-chat-msg { font-size:12px;color:var(--text-muted);line-height:1.5;white-space:pre-wrap;word-break:break-word; }
+.sp-chat-form { display:flex;flex-direction:column;gap:6px; }
+.sp-chat-form input, .sp-chat-form textarea {
+  background:var(--bg);color:var(--text);border:1px solid #475569;
+  border-radius:4px;font-size:12px;padding:6px 8px;font-family:inherit;
+}
+.sp-chat-form textarea { resize:vertical;min-height:44px; }
+.sp-chat-form button {
+  align-self:flex-end;background:#8b5cf6;color:#fff;border:none;
+  border-radius:4px;font-size:11px;padding:5px 14px;cursor:pointer;font-weight:600;
+}
+.sp-chat-form button:hover { background:#7c3aed; }
+.sp-chat-note { font-size:11px;color:#64748b;font-style:italic; }
 /* live logs section */
 .sp-log-toggle { display:flex;align-items:center;gap:8px;background:#1e293b;color:#cbd5e1;border:1px solid #334155;border-radius:5px;font-size:12px;font-weight:600;padding:7px 10px;cursor:pointer;width:100%;text-align:left; }
 .sp-log-toggle:hover { background:#334155; }
