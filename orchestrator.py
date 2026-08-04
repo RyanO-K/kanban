@@ -259,9 +259,13 @@ def _chat_pump(proc, inbox_path, log_path, poll_seconds=1.0):
     """Per-run daemon thread body: relay inbox messages to the child's stdin.
 
     Loop (~1s):
-      1. Child died?            -> delete the inbox file, exit.
+      1. Child died?            -> release the inbox (deleted only if fully
+         delivered; a pending-bearing inbox is KEPT for reap to surface into
+         the ticket), exit.
       2. New inbox lines?       -> write each to child stdin as a stream-json
-         user message wrapped `[Message from <writer> via Discord]\\n<msg>`;
+         user message wrapped `[Message from <writer> via Discord]\\n<msg>`,
+         then persist the delivered byte offset to the `<inbox>.pos` sidecar
+         (queue visibility for the GET endpoint + loss-proofing for reap);
          a broken pipe on write is treated as child death (step 1).
       3. Result in the run log? -> arms the close decision.
       4. chat_should_close      -> close child stdin (the CLI exits after its
@@ -274,12 +278,10 @@ def _chat_pump(proc, inbox_path, log_path, poll_seconds=1.0):
     result_seen_after_last_send = False
     while True:
         if proc.poll() is not None:
-            # Child died (finished, killed, or crashed): drop the inbox —
-            # messages posted just as the run died are silently dropped.
-            try:
-                os.remove(inbox_path)
-            except OSError:
-                pass
+            # Child died (finished, killed, or crashed). A drained inbox is
+            # deleted; undelivered messages survive on disk so the reap path
+            # surfaces them (comment + pendingChat) instead of losing them.
+            oc.chat_release_inbox(inbox_path)
             return
         try:
             # 2. Deliver any new inbox lines to the child's stdin.
@@ -296,13 +298,16 @@ def _chat_pump(proc, inbox_path, log_path, poll_seconds=1.0):
                     proc.stdin.flush()
                 except (OSError, ValueError):
                     # Broken pipe: the child is dead/dying. Same cleanup as
-                    # step 1; the reap path handles the ticket.
-                    try:
-                        os.remove(inbox_path)
-                    except OSError:
-                        pass
+                    # step 1; the reap path handles the ticket (and surfaces
+                    # whatever this batch did not deliver).
+                    oc.chat_release_inbox(inbox_path)
                     return
                 result_seen_after_last_send = False
+            if lines:
+                # Persist how far delivery got (real file bytes). Batch-level:
+                # a crash mid-batch re-surfaces the whole batch as pending —
+                # err on the side of not losing messages.
+                oc.chat_write_offset(inbox_path, inbox_off)
             # 3. Watch the run log for the CLI's top-level result lines.
             log_lines, log_off = _tail_new_lines(log_path, log_off)
             for raw in log_lines:
@@ -367,10 +372,33 @@ def _release_proc(pid):
                 pass
     pump = _PUMPS.pop(pid, None)
     if pump is not None:
-        try:
-            os.remove(pump["inbox"])
-        except OSError:
-            pass
+        # Drained inbox: deleted. An inbox with undelivered messages is KEPT
+        # (with its .pos sidecar) so the reap path can surface them into the
+        # ticket (comment + pendingChat) before clearing it.
+        oc.chat_release_inbox(pump["inbox"])
+
+
+def _surface_undelivered_chat(t):
+    """Move a finished run's undelivered chat messages onto the ticket.
+
+    Called on terminal reap outcomes, after the ticket has been re-read and
+    BEFORE its terminal status is written. Reads the run's inbox against the
+    pump's delivered-offset sidecar; any still-pending messages are appended
+    to the ticket's `pendingChat` list (injected into the next run's prompt by
+    the prompt builders and consumed at dispatch) and recorded in a
+    human-visible comment, then the inbox is cleared. Returns True when
+    anything was surfaced. The caller is responsible for writing the ticket.
+    """
+    inbox = oc.chat_inbox_path(t["_board"], t["id"])
+    pending = [m for m in oc.chat_read_messages(inbox) if not m["delivered"]]
+    if not pending:
+        return False
+    stripped = [{"message": m["message"], "writer": m["writer"], "ts": m["ts"]}
+                for m in pending]
+    t.setdefault("pendingChat", []).extend(stripped)
+    _add_comment(t, oc.chat_undelivered_comment(stripped))
+    oc.chat_clear_inbox(inbox)
+    return True
 
 
 def _run_tracked(cmd, label, **run_kwargs):
@@ -1241,11 +1269,10 @@ def spawn_agent(kanban_dir, board, task, profile, model):
 
     inbox_path = oc.chat_inbox_path(board, task["id"])
     if chat:
-        # Stale messages from a previous run must never leak into this run.
-        try:
-            os.remove(inbox_path)
-        except OSError:
-            pass
+        # Stale messages from a previous run must never leak into this run
+        # (undelivered ones were surfaced onto the ticket at reap; the offset
+        # sidecar goes with the inbox).
+        oc.chat_clear_inbox(inbox_path)
 
     # On POSIX, put the agent in its own session/process group so kill_pid can
     # take down the whole child tree via os.killpg (Windows uses taskkill /T).
@@ -1322,6 +1349,9 @@ def _dispatch_one(kanban_dir, task, profile, model):
         return False
     marker = spawn_agent(kanban_dir, task["_board"], task, profile, model)
     oc.set_marker(task, marker)
+    # pendingChat has been consumed: spawn_agent built this run's prompt from
+    # it (chat_prompt_section), so the queued guidance is now delivered.
+    task.pop("pendingChat", None)
     # Record the sub-agent's session id and cwd at the top level so the board UI
     # can offer a `cd '<dir>'; claude --resume <id>` takeover command.
     if marker.get("sessionId"):
@@ -1352,6 +1382,11 @@ def _build_agent_prompt(task, profile, board_meta=None):
             f"Human notes (authoritative, overrides the question if it was wrong): "
             f"{q['answer'].get('notes')}"
         )
+    # Chat messages a previous run never received (surfaced at reap) are
+    # delivered here; _dispatch_one clears pendingChat once we are spawned.
+    chat_section = oc.chat_prompt_section(task.get("pendingChat") or [])
+    if chat_section:
+        parts.append(chat_section)
     parts.append(
         "\nWhen done, append a summary comment to the ticket JSON's `comments` "
         "(writer 'Claude')."
@@ -1387,6 +1422,10 @@ def _build_resume_prompt(task, profile, board_meta=None):
         f"Human notes (authoritative, overrides the question if it was wrong): "
         f"{ans.get('notes')}"
     )
+    # Chat messages the previous run never received (surfaced at reap).
+    chat_section = oc.chat_prompt_section(task.get("pendingChat") or [])
+    if chat_section:
+        parts.append(chat_section)
     parts.append(
         "\nFinish the ticket. When done, append a summary comment to the ticket "
         "JSON's `comments` (writer 'Claude') and move it to `completed`. If you are "
@@ -1619,6 +1658,9 @@ def tick(kanban_dir, *, opus_triage, summarize_progress=None, initial_triage=Non
                 # status write, and retire its idle sidecar. (Ticket #42.)
                 t = _reread_task(t)
                 clear_idle(kanban_dir, t["_board"], t["id"])
+                # Chat messages the killed run never received ride to the next
+                # run via pendingChat (the release above kept a pending inbox).
+                _surface_undelivered_chat(t)
                 _add_comment(t, "Stopped by Stop-All.")
                 _add_history(t, t.get("status"), "blocked")
                 t["status"] = "blocked"
@@ -1654,7 +1696,29 @@ def tick(kanban_dir, *, opus_triage, summarize_progress=None, initial_triage=Non
                 # the board loses the log for every well-behaved agent.
                 if not t.get("completedLog"):
                     _save_completed_log(kanban_dir, t)
+                # Chat straggler check — only once the process is DEAD. While
+                # it lives, the pump is still delivering queued messages into
+                # the run (the close decision waits for a drained inbox), so
+                # surfacing here would double-handle them. A dead process with
+                # undelivered messages means the agent finished without seeing
+                # them: preserve them and re-queue for a follow-up run.
+                requeue = False
+                done_pid = (oc.get_marker(t) or {}).get("pid")
+                if not _process_alive(done_pid):
+                    requeue = _surface_undelivered_chat(t)
+                    if done_pid:
+                        _release_proc(done_pid)
                 oc.clear_marker(t)
+                if requeue:
+                    _add_comment(t, "Re-queued to `ready`: user guidance "
+                                    "arrived before the run ended and was not "
+                                    "delivered. The next run will receive it "
+                                    "in its prompt.")
+                    _add_history(t, t.get("status"), "ready")
+                    t["status"] = "ready"
+                    oc.append_activity(kanban_dir, {
+                        "ts": oc.now_iso(), "kind": "chat_requeue",
+                        "board": t["_board"], "ticket": t["id"]})
                 write_task(t["_path"], t)
             continue
         pid = m.get("pid")
@@ -1693,6 +1757,11 @@ def tick(kanban_dir, *, opus_triage, summarize_progress=None, initial_triage=Non
         t = _reread_task(t)
         m = oc.get_marker(t) or m
         clear_idle(kanban_dir, t["_board"], t["id"])
+        # Surface chat messages this run never received BEFORE the inbox is
+        # cleaned up. They land on the ticket (comment + pendingChat) and are
+        # injected into the next run's prompt; a `completed` outcome with
+        # pending guidance re-queues instead of finishing (below).
+        chat_pending = _surface_undelivered_chat(t)
         if action == "kill_requested":
             # Interpret + record the agent's progress BEFORE destroying it, so
             # the kill leaves a resumable checkpoint instead of just "Killed".
@@ -1711,6 +1780,22 @@ def tick(kanban_dir, *, opus_triage, summarize_progress=None, initial_triage=Non
             # Save the run-log turns before clearing the marker so they survive
             # after the log file is deleted/archived (ticket #58).
             _save_completed_log(kanban_dir, t)
+            if chat_pending:
+                # The run finished but user guidance queued for it was never
+                # delivered. Completing now would drop it — re-queue instead:
+                # the follow-up dispatch injects pendingChat into the agent's
+                # prompt, and publish happens when THAT run completes.
+                _add_comment(t, "Re-queued to `ready`: user guidance arrived "
+                                "before the run ended and was not delivered. "
+                                "The next run will receive it in its prompt.")
+                _add_history(t, t.get("status"), "ready")
+                t["status"] = "ready"
+                oc.clear_marker(t)
+                write_task(t["_path"], t)
+                oc.append_activity(kanban_dir, {
+                    "ts": oc.now_iso(), "kind": "chat_requeue",
+                    "board": t["_board"], "ticket": t["id"]})
+                continue
             # Record the agent's output before marking the ticket done: kanban-only
             # work is auto-committed to master (gated by commit requirements);
             # everything else is published to the ticket's isolated branch.

@@ -186,18 +186,73 @@ def test_pump_skips_malformed_inbox_lines(tmp_path):
         proc.wait()
 
 
-def test_pump_deletes_inbox_and_exits_when_child_dies(tmp_path):
+def test_pump_keeps_pending_inbox_when_child_dies(tmp_path):
+    # Bot-messaging follow-up: a queued message must SURVIVE the run's death so
+    # the reap path can surface it into the ticket (comment + pendingChat)
+    # instead of silently dropping it.
     echo = tmp_path / "echo.jsonl"
     inbox = tmp_path / "chat" / "demo__1.jsonl"
     log = tmp_path / "run.log"
     log.write_text("", encoding="utf-8")
-    _append_inbox(str(inbox), "pending")   # a queued message dies with the run
+    _append_inbox(str(inbox), "pending")   # queued, never delivered
     proc = _spawn_child(echo)
     proc.kill()
     proc.wait()
     th = _run_pump(proc, inbox, log)
     assert _wait(lambda: not th.is_alive()), "pump must exit when child died"
-    assert not os.path.exists(str(inbox)), "pump must delete the inbox on child death"
+    assert os.path.exists(str(inbox)), \
+        "an inbox with undelivered messages must survive child death"
+    msgs = oc.chat_read_messages(str(inbox))
+    assert [(m["message"], m["delivered"]) for m in msgs] == [("pending", False)]
+
+
+def test_pump_deletes_drained_inbox_when_child_dies(tmp_path):
+    # Everything delivered (offset sidecar covers the whole file): the pump's
+    # child-death cleanup deletes inbox + sidecar as before.
+    echo = tmp_path / "echo.jsonl"
+    inbox = tmp_path / "chat" / "demo__1.jsonl"
+    log = tmp_path / "run.log"
+    log.write_text("", encoding="utf-8")
+    proc = _spawn_child(echo)
+    try:
+        th = _run_pump(proc, inbox, log)
+        _append_inbox(str(inbox), "seen by the agent")
+
+        def _delivered():
+            try:
+                return len(echo.read_text(encoding="utf-8").splitlines()) >= 1
+            except OSError:
+                return False
+        assert _wait(_delivered)
+    finally:
+        proc.kill()
+        proc.wait()
+    assert _wait(lambda: not th.is_alive())
+    assert not os.path.exists(str(inbox)), \
+        "a fully delivered inbox is deleted on child death"
+    assert not os.path.exists(oc.chat_offset_path(str(inbox)))
+
+
+def test_pump_persists_delivered_offset_sidecar(tmp_path):
+    echo = tmp_path / "echo.jsonl"
+    inbox = tmp_path / "chat" / "demo__1.jsonl"
+    log = tmp_path / "run.log"
+    log.write_text("", encoding="utf-8")
+    proc = _spawn_child(echo)
+    try:
+        _run_pump(proc, inbox, log)
+        _append_inbox(str(inbox), "first")
+
+        def _offset_written():
+            return oc.chat_read_offset(str(inbox)) > 0
+        assert _wait(_offset_written), "pump must persist the delivered offset"
+        assert oc.chat_read_offset(str(inbox)) == os.path.getsize(str(inbox))
+        # A GET-style read now reports the message as delivered.
+        msgs = oc.chat_read_messages(str(inbox))
+        assert [(m["message"], m["delivered"]) for m in msgs] == [("first", True)]
+    finally:
+        proc.kill()
+        proc.wait()
 
 
 def test_pump_treats_broken_pipe_as_child_death(tmp_path):
@@ -229,19 +284,36 @@ def test_pump_treats_broken_pipe_as_child_death(tmp_path):
     th.start()
     assert _wait(lambda: not th.is_alive()), \
         "broken pipe must terminate the pump like a child death"
-    assert not os.path.exists(str(inbox))
+    # "boom" was never delivered (the write raised), so the inbox survives for
+    # the reap path to surface — same rule as child death with pending messages.
+    assert os.path.exists(str(inbox))
+    msgs = oc.chat_read_messages(str(inbox))
+    assert [(m["message"], m["delivered"]) for m in msgs] == [("boom", False)]
 
 
-def test_release_proc_drops_pump_and_deletes_inbox(tmp_path):
+class _DeadThread:
+    def is_alive(self):
+        return False
+
+
+def test_release_proc_drops_pump_and_deletes_drained_inbox(tmp_path):
     inbox = tmp_path / "demo__1.jsonl"
-    inbox.write_text("x\n", encoding="utf-8")
-
-    class _DeadThread:
-        def is_alive(self):
-            return False
+    inbox.write_text("x\n", encoding="utf-8")  # malformed-only == nothing pending
 
     pid = 987654
     orch._PUMPS[pid] = {"thread": _DeadThread(), "inbox": str(inbox)}
     orch._release_proc(pid)   # pid not in _PROCS: must still clean the pump
     assert pid not in orch._PUMPS
     assert not inbox.exists()
+
+
+def test_release_proc_keeps_inbox_with_undelivered_messages(tmp_path):
+    inbox = tmp_path / "demo__1.jsonl"
+    _append_inbox(str(inbox), "queued for the next run")
+
+    pid = 987655
+    orch._PUMPS[pid] = {"thread": _DeadThread(), "inbox": str(inbox)}
+    orch._release_proc(pid)
+    assert pid not in orch._PUMPS
+    assert inbox.exists(), \
+        "release must not delete an inbox holding undelivered messages"
