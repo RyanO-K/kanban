@@ -253,6 +253,134 @@ def chat_should_close(result_seen_after_last_send, inbox_empty):
     return bool(result_seen_after_last_send) and bool(inbox_empty)
 
 
+# Delivered-offset sidecar + queue visibility (bot-messaging follow-up to the
+# 2026-07-03 spec). The pump's inbox byte offset used to live only in thread
+# memory, so nothing else could tell a QUEUED message from a DELIVERED one and
+# any undelivered message was silently deleted with the inbox at run end. The
+# pump now persists its delivered offset to a sidecar (`<inbox>.pos`); the
+# server's GET endpoint splits the inbox into delivered/pending against it, and
+# the reap path surfaces still-pending messages into the ticket (comment +
+# `pendingChat` field) so they inform the follow-up run instead of being lost.
+
+def chat_offset_path(inbox_path):
+    """The delivered-offset sidecar for an inbox file: `<inbox>.pos`."""
+    return inbox_path + ".pos"
+
+
+def chat_read_offset(inbox_path):
+    """The delivered byte offset persisted for *inbox_path* (0 if absent/bad)."""
+    try:
+        with open(chat_offset_path(inbox_path), "r", encoding="utf-8") as f:
+            return max(0, int(f.read().strip() or 0))
+    except (OSError, ValueError):
+        return 0
+
+
+def chat_write_offset(inbox_path, offset):
+    """Persist the pump's delivered byte offset. Best-effort: never raises."""
+    try:
+        with open(chat_offset_path(inbox_path), "w", encoding="utf-8") as f:
+            f.write(str(int(offset)))
+    except (OSError, ValueError):
+        pass
+
+
+def chat_split_messages(data, delivered_offset):
+    """Parse raw inbox bytes into messages tagged delivered/pending.
+
+    Pure. *data* is the inbox file's bytes; *delivered_offset* is the pump's
+    persisted byte offset (everything before it has been written to the agent's
+    stdin). Returns a list of {"message","writer","ts","delivered"} in file
+    order. Only complete (\\n-terminated) lines count; malformed lines are
+    skipped, mirroring the pump's own parsing.
+    """
+    out = []
+    pos = 0
+    for raw in data.split(b"\n"):
+        end = pos + len(raw) + 1  # +1 for the \n this line ends at
+        if end > len(data):
+            break  # trailing partial line: a writer is mid-append, skip it
+        line = raw.decode("utf-8", errors="replace")
+        if line.endswith("\r"):
+            line = line[:-1]
+        parsed = chat_parse_inbox_line(line) if line.strip() else None
+        if parsed is not None:
+            parsed["delivered"] = end <= delivered_offset
+            out.append(parsed)
+        pos = end
+    return out
+
+
+def chat_read_messages(inbox_path):
+    """Read an inbox file + its offset sidecar into tagged messages.
+
+    Returns [] when the inbox is missing/unreadable (no run, or already
+    cleaned up).
+    """
+    try:
+        with open(inbox_path, "rb") as f:
+            data = f.read()
+    except OSError:
+        return []
+    return chat_split_messages(data, chat_read_offset(inbox_path))
+
+
+def chat_clear_inbox(inbox_path):
+    """Delete an inbox file and its offset sidecar. Best-effort."""
+    for p in (inbox_path, chat_offset_path(inbox_path)):
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+
+
+def chat_release_inbox(inbox_path):
+    """Run-is-over cleanup: delete the inbox ONLY if fully delivered.
+
+    Called by the pump on child death and by `_release_proc` at reap. An inbox
+    that still holds undelivered messages is kept (offset sidecar included) so
+    the reap path can surface those messages into the ticket instead of losing
+    them; a drained inbox is deleted as before.
+    """
+    pending = [m for m in chat_read_messages(inbox_path) if not m["delivered"]]
+    if not pending:
+        chat_clear_inbox(inbox_path)
+
+
+def chat_undelivered_comment(pending):
+    """Ticket-comment text recording messages a run ended without receiving.
+
+    Pure. *pending* is a list of {"message","writer","ts"} dicts (the
+    undelivered tail of an inbox). Returns a single comment string; the same
+    messages also land on the ticket's `pendingChat` field so the next
+    dispatch injects them into the agent's prompt.
+    """
+    lines = ["User message(s) queued for the agent were NOT delivered before "
+             "the run ended. They are preserved on the ticket (`pendingChat`) "
+             "and will be handed to the next run's prompt:"]
+    for m in pending:
+        ts = f" ({m['ts']})" if m.get("ts") else ""
+        lines.append(f"- {m.get('writer', 'unknown')}{ts}: {m['message']}")
+    return "\n".join(lines)
+
+
+def chat_prompt_section(pending):
+    """Prompt section injecting queued user guidance into a follow-up run.
+
+    Pure. Returns "" when there is nothing pending, else a clearly framed
+    block for `_build_agent_prompt` / `_build_resume_prompt`.
+    """
+    if not pending:
+        return ""
+    lines = ["\nUser guidance received mid-run (sent to the previous run's "
+             "agent but not delivered before it ended). Treat these as "
+             "authoritative user instructions for this run:"]
+    for m in pending:
+        ts = f" at {m['ts']}" if m.get("ts") else ""
+        lines.append(f"- From {m.get('writer', 'unknown')}{ts}: {m['message']}")
+    return "\n".join(lines)
+
+
 def branch_name(task):
     """The output branch name for a ticket: `ticket/<id>-<slug>`.
 

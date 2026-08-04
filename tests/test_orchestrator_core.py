@@ -857,3 +857,117 @@ def test_chat_should_close_truth_table():
     assert oc.chat_should_close(True, False) is False
     assert oc.chat_should_close(False, True) is False
     assert oc.chat_should_close(False, False) is False
+
+# --- Agent chat: delivered-offset sidecar + queue visibility (bot messaging) ---
+
+
+def _inbox_line(message, writer="ryan", ts="2026-08-03T00:00:00+00:00"):
+    return json.dumps({"message": message, "writer": writer, "ts": ts},
+                      ensure_ascii=False) + "\n"
+
+
+def test_chat_offset_path_is_pos_sidecar():
+    assert oc.chat_offset_path(os.path.join("x", "demo__1.jsonl")) == \
+        os.path.join("x", "demo__1.jsonl.pos")
+
+
+def test_chat_offset_roundtrip(tmp_path):
+    inbox = str(tmp_path / "demo__1.jsonl")
+    assert oc.chat_read_offset(inbox) == 0          # no sidecar yet
+    oc.chat_write_offset(inbox, 42)
+    assert oc.chat_read_offset(inbox) == 42
+    oc.chat_write_offset(inbox, 0)
+    assert oc.chat_read_offset(inbox) == 0
+
+
+def test_chat_read_offset_malformed_sidecar(tmp_path):
+    inbox = str(tmp_path / "demo__1.jsonl")
+    with open(oc.chat_offset_path(inbox), "w", encoding="utf-8") as f:
+        f.write("not a number")
+    assert oc.chat_read_offset(inbox) == 0
+
+
+def test_chat_split_messages_delivered_vs_pending():
+    a = _inbox_line("first").encode("utf-8")
+    b = _inbox_line("second", writer="bob").encode("utf-8")
+    msgs = oc.chat_split_messages(a + b, len(a))
+    assert [(m["message"], m["delivered"]) for m in msgs] == \
+        [("first", True), ("second", False)]
+    # Everything delivered.
+    msgs = oc.chat_split_messages(a + b, len(a) + len(b))
+    assert all(m["delivered"] for m in msgs)
+    # Nothing delivered.
+    msgs = oc.chat_split_messages(a + b, 0)
+    assert not any(m["delivered"] for m in msgs)
+
+
+def test_chat_split_messages_skips_malformed_and_partial():
+    a = b"{not json at all\n"
+    b = _inbox_line("real").encode("utf-8")
+    partial = b'{"message": "still being writ'
+    msgs = oc.chat_split_messages(a + b + partial, 0)
+    assert [m["message"] for m in msgs] == ["real"]
+
+
+def test_chat_read_messages_missing_file(tmp_path):
+    assert oc.chat_read_messages(str(tmp_path / "nope.jsonl")) == []
+
+
+def test_chat_read_messages_uses_sidecar_offset(tmp_path):
+    # Text-mode appends (the server's own convention) become CRLF on Windows,
+    # so the delivered offset is measured from the real on-disk size — exactly
+    # what the pump's byte-offset tailing records.
+    inbox = str(tmp_path / "demo__1.jsonl")
+    with open(inbox, "w", encoding="utf-8") as f:
+        f.write(_inbox_line("first"))
+    oc.chat_write_offset(inbox, os.path.getsize(inbox))
+    with open(inbox, "a", encoding="utf-8") as f:
+        f.write(_inbox_line("second"))
+    msgs = oc.chat_read_messages(inbox)
+    assert [(m["message"], m["delivered"]) for m in msgs] == \
+        [("first", True), ("second", False)]
+
+
+def test_chat_clear_inbox_removes_both_files(tmp_path):
+    inbox = str(tmp_path / "demo__1.jsonl")
+    with open(inbox, "w", encoding="utf-8") as f:
+        f.write(_inbox_line("x"))
+    oc.chat_write_offset(inbox, 3)
+    oc.chat_clear_inbox(inbox)
+    assert not os.path.exists(inbox)
+    assert not os.path.exists(oc.chat_offset_path(inbox))
+    oc.chat_clear_inbox(inbox)  # idempotent on missing files
+
+
+def test_chat_release_inbox_keeps_pending_deletes_drained(tmp_path):
+    inbox = str(tmp_path / "demo__1.jsonl")
+    with open(inbox, "w", encoding="utf-8") as f:
+        f.write(_inbox_line("pending one"))
+    # Nothing delivered yet: the inbox must SURVIVE release for reap to surface.
+    oc.chat_release_inbox(inbox)
+    assert os.path.exists(inbox)
+    # Fully delivered: release deletes inbox + sidecar.
+    oc.chat_write_offset(inbox, os.path.getsize(inbox))
+    oc.chat_release_inbox(inbox)
+    assert not os.path.exists(inbox)
+    assert not os.path.exists(oc.chat_offset_path(inbox))
+
+
+def test_chat_undelivered_comment_lists_messages():
+    pending = [{"message": "check the tests", "writer": "ryan",
+                "ts": "2026-08-03T12:00:00+00:00"},
+               {"message": "use py launcher", "writer": "bob", "ts": ""}]
+    text = oc.chat_undelivered_comment(pending)
+    assert "NOT delivered" in text
+    assert "pendingChat" in text
+    assert "- ryan (2026-08-03T12:00:00+00:00): check the tests" in text
+    assert "- bob: use py launcher" in text
+
+
+def test_chat_prompt_section_empty_and_filled():
+    assert oc.chat_prompt_section([]) == ""
+    section = oc.chat_prompt_section(
+        [{"message": "also update docs", "writer": "ryan",
+          "ts": "2026-08-03T12:00:00+00:00"}])
+    assert "User guidance received mid-run" in section
+    assert "- From ryan at 2026-08-03T12:00:00+00:00: also update docs" in section
