@@ -1279,6 +1279,39 @@ def orch_chat(board, task_id, payload):
     return {"ok": True}, 200
 
 
+def orch_chat_get(board, task_id):
+    """Queue status for a ticket's agent chat (bot messaging).
+
+    Read-only companion to `orch_chat`: lets the UI show what the user has
+    queued and whether the running agent has received it yet.
+
+    - `messages`: the current run's inbox split against the pump's delivered
+      offset — each {"message","writer","ts","delivered"}. Empty when there is
+      no inbox (no run, or all delivered and cleaned up).
+    - `nextRun`: messages a previous run never received, surfaced onto the
+      ticket's `pendingChat` at reap; they are injected into the next run's
+      prompt and consumed at dispatch.
+    - `running`: same predicate the POST endpoint gates on.
+    """
+    path = _ticket_file(board, task_id)
+    if path is None or not os.path.isfile(path):
+        return {"error": "not found"}, 404
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            task = json.load(f)
+    except (OSError, ValueError):
+        return {"error": "could not read ticket"}, 500
+    marker = task.get("orchestrator") or {}
+    running = (marker.get("state") == "dispatched"
+               and task.get("status") == "in_progress")
+    return {
+        "enabled": bool(_oc.CHAT_ENABLED),
+        "running": running,
+        "messages": _oc.chat_read_messages(_oc.chat_inbox_path(board, task_id)),
+        "nextRun": task.get("pendingChat") or [],
+    }, 200
+
+
 # --- Performance monitor ----------------------------------------------------
 
 def _owned_pids():
@@ -1487,6 +1520,13 @@ class KanbanHandler(BaseHTTPRequestHandler):
             self._json(*orch_state_get())
         elif path == "/api/orchestrator/activity":
             self._json(*orch_activity())
+        # GET /api/orchestrator/chat/<board>/<id> — agent-chat queue status
+        elif path.startswith("/api/orchestrator/chat/"):
+            parts = path.split("/")
+            if len(parts) == 6:
+                self._json(*orch_chat_get(unquote(parts[4]), unquote(parts[5])))
+            else:
+                self.send_error(404)
         elif path == "/api/performance":
             self._json(*perf_snapshot())
         elif path.startswith("/api/doc/"):

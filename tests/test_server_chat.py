@@ -142,3 +142,83 @@ def test_chat_cross_origin_requires_token(server, kanban):
                               "Connection": "close"})
     assert status == 403
     assert not os.path.exists(oc.chat_inbox_path("demo", "1"))
+
+# --- GET /api/orchestrator/chat/<board>/<id> — queue status (bot messaging) ---
+
+
+def test_chat_get_404_unknown_ticket(server):
+    status, body = _req(server, "GET", "/api/orchestrator/chat/demo/999")
+    assert status == 404
+    assert body == {"error": "not found"}
+
+
+def test_chat_get_empty_when_no_inbox(server, kanban):
+    status, body = _req(server, "GET", "/api/orchestrator/chat/demo/1")
+    assert status == 200
+    assert body == {"enabled": True, "running": False,
+                    "messages": [], "nextRun": []}
+
+
+def test_chat_get_running_flag(server, kanban):
+    _make_running(kanban)
+    status, body = _req(server, "GET", "/api/orchestrator/chat/demo/1")
+    assert status == 200
+    assert body["running"] is True
+
+
+def test_chat_get_reports_enabled_flag(server, kanban, monkeypatch):
+    monkeypatch.setattr(oc, "CHAT_ENABLED", False)
+    status, body = _req(server, "GET", "/api/orchestrator/chat/demo/1")
+    assert status == 200
+    assert body["enabled"] is False
+
+
+def test_chat_get_shows_queued_messages(server, kanban):
+    _make_running(kanban)
+    _req(server, "POST", "/api/orchestrator/chat/demo/1",
+         {"message": "first", "writer": "ryan"})
+    _req(server, "POST", "/api/orchestrator/chat/demo/1",
+         {"message": "second", "writer": "bob"})
+    status, body = _req(server, "GET", "/api/orchestrator/chat/demo/1")
+    assert status == 200
+    assert [(m["message"], m["writer"], m["delivered"])
+            for m in body["messages"]] == [("first", "ryan", False),
+                                           ("second", "bob", False)]
+
+
+def test_chat_get_delivered_split_uses_offset_sidecar(server, kanban):
+    _make_running(kanban)
+    _req(server, "POST", "/api/orchestrator/chat/demo/1",
+         {"message": "seen", "writer": "ryan"})
+    inbox = oc.chat_inbox_path("demo", "1")
+    # Simulate the pump having delivered everything so far.
+    oc.chat_write_offset(inbox, os.path.getsize(inbox))
+    _req(server, "POST", "/api/orchestrator/chat/demo/1",
+         {"message": "still queued", "writer": "ryan"})
+    status, body = _req(server, "GET", "/api/orchestrator/chat/demo/1")
+    assert status == 200
+    assert [(m["message"], m["delivered"]) for m in body["messages"]] == \
+        [("seen", True), ("still queued", False)]
+
+
+def test_chat_get_surfaces_pending_chat_as_next_run(server, kanban):
+    # pendingChat on the ticket (reap surfaced it) shows up as nextRun.
+    p = os.path.join(kanban, "demo", "1.json")
+    with open(p, "r", encoding="utf-8") as f:
+        t = json.load(f)
+    t["pendingChat"] = [{"message": "carry me over", "writer": "ryan",
+                         "ts": "2026-08-03T12:00:00+00:00"}]
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(t, f)
+    status, body = _req(server, "GET", "/api/orchestrator/chat/demo/1")
+    assert status == 200
+    assert body["nextRun"] == t["pendingChat"]
+    assert body["running"] is False
+
+
+def test_chat_get_is_readonly_no_auth_needed(server, kanban):
+    # GETs are not gated by _authorized() — same as every other read route.
+    status, _ = _req(server, "GET", "/api/orchestrator/chat/demo/1",
+                     headers={"Origin": "http://evil.example.com",
+                              "Connection": "close"})
+    assert status == 200
