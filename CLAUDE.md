@@ -47,6 +47,8 @@ entry to `history` with a UTC timestamp. To add a new ticket, create `<next-id>.
 | Create ticket | `POST /api/board/<slug>/task` body `{"title":...,"detail":...}` |
 | Add comment | `POST /api/board/<slug>/task/<id>/comment` body `{"writer":...,"message":...}` |
 | Delete ticket | `DELETE /api/board/<slug>/task/<id>` |
+| Message a running agent | `POST /api/orchestrator/chat/<board>/<id>` body `{"message":...,"writer":...}` |
+| Chat queue status | `GET /api/orchestrator/chat/<board>/<id>` |
 
 The server auto-appends `history` entries and bumps `_meta.json`'s `updated` date.
 
@@ -285,6 +287,34 @@ triage prompt (`orchestrator_triage_prompt.md`).
 - **Kill:** Orchestrator-tab kill buttons hit `POST /api/orchestrator/kill/<board>/<id>`
   (instant if the PID is alive, else queued via `killRequested`). The loop also reaps stalled
   agents on its own (gated by a productivity check).
+
+### Agent chat — message a running bot
+
+A human can message a ticket's RUNNING agent without interrupting it (spec
+`docs/specs/2026-07-03-agent-chat-design.md` + the bot-messaging follow-up). The board
+UI shows a **Message agent** section on any in-progress ticket with a dispatched agent.
+
+- **Send:** `POST /api/orchestrator/chat/<board>/<id>` body `{"message","writer"}` →
+  `200 {"ok": true}` | `400` empty message | `404` | `409 {"error": "not running" |
+  "chat disabled"}`. Messages append to a per-run inbox
+  (`_orchestrator/chat/<board>__<id>.jsonl`); the orchestrator's per-run pump thread
+  relays each one to the agent's stdin as a stream-json user turn, wrapped
+  `[Message from <writer> via Discord]\n<msg>`. The CLI queues it as the **next user
+  turn** — the current task step is never interrupted, and a message arriving after the
+  agent's final result triggers another turn instead of ending the run.
+- **Queue status:** `GET /api/orchestrator/chat/<board>/<id>` →
+  `{"enabled", "running", "messages": [{"message","writer","ts","delivered"}...],
+  "nextRun": [...]}`. `delivered` splits the inbox against the pump's persisted byte
+  offset (`<inbox>.pos` sidecar); `nextRun` is the ticket's `pendingChat` (below).
+- **Nothing is lost at run end:** if a run terminates (completed/killed/crashed/stalled/
+  stop-all) with undelivered messages, the reap surfaces them onto the ticket as a
+  `pendingChat` list plus an Orchestrator comment. A would-be-`completed` ticket with
+  pending guidance is **re-queued to `ready`** (activity kind `chat_requeue`) instead of
+  finishing; the next dispatch injects `pendingChat` into the agent's prompt as a
+  "user guidance received mid-run" section and consumes the field. Blocked outcomes keep
+  `pendingChat` for whenever the ticket is re-dispatched.
+- **Escape hatch:** `CHAT_ENABLED = False` in `orchestrator_core.py` restores the legacy
+  argv-prompt dispatch (no stdin pipe/pump); the POST then returns 409.
 
 ## Performance tab
 
