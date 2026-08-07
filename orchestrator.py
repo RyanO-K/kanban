@@ -401,6 +401,12 @@ def _surface_undelivered_chat(t):
     return True
 
 
+def _has_undelivered_chat(t):
+    """True when the ticket's run inbox still holds undelivered messages."""
+    inbox = oc.chat_inbox_path(t["_board"], t["id"])
+    return any(not m["delivered"] for m in oc.chat_read_messages(inbox))
+
+
 def _run_tracked(cmd, label, **run_kwargs):
     """Run a subprocess while registering its PID in _SERVER_OPS.
 
@@ -1708,6 +1714,17 @@ def tick(kanban_dir, *, opus_triage, summarize_progress=None, initial_triage=Non
                     requeue = _surface_undelivered_chat(t)
                     if done_pid:
                         _release_proc(done_pid)
+                elif _has_undelivered_chat(t):
+                    # Still ALIVE with an undelivered inbox: the pump may yet
+                    # deliver (a message after the final result triggers
+                    # another turn). Clearing the marker NOW would orphan the
+                    # inbox if the child died undelivered — a marker-less
+                    # ticket is never re-reaped, so the messages would sit
+                    # invisible on disk until the next dispatch wiped them.
+                    # Leave the marker and re-judge next tick. Bounded: the
+                    # ticket is done, so the chat POST 409s (no new messages)
+                    # and the pump delivers within ~1s or the child dies.
+                    continue
                 oc.clear_marker(t)
                 if requeue:
                     _add_comment(t, "Re-queued to `ready`: user guidance "

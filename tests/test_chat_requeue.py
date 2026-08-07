@@ -149,6 +149,44 @@ def test_self_completed_ticket_with_pending_chat_requeues(kanban, monkeypatch):
     assert not os.path.exists(inbox)
 
 
+def test_self_completed_alive_process_defers_marker_clear(kanban, monkeypatch):
+    """#48 guard, process still ALIVE with an undelivered inbox: the pump may
+    still deliver, so the tick must NOT clear the marker yet — a marker-less
+    ticket is never re-reaped, so the inbox would be orphaned (then wiped by
+    the next dispatch) if the child died before delivery. Once the process is
+    dead, the normal surface-and-requeue path takes over."""
+    pid = 9007
+    p = _set_dispatched(kanban, "1", pid)
+    inbox = _queue_pending(kanban, monkeypatch, "demo", "1", ["late steer"])
+    t = _read(p)
+    t["status"] = "completed"
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(t, f)
+    oc.write_state(kanban, {"enabled": False, "concurrencyCap": 3,
+                            "stopAllRequested": False})
+    monkeypatch.setattr(orch, "_process_alive", lambda _pid: True)
+    monkeypatch.setitem(orch._PROCS, pid, object())
+
+    orch.tick(kanban, opus_triage=lambda *a, **k: {"dispatch": []})
+
+    t1 = _read(p)
+    assert t1["status"] == "completed"
+    assert (t1.get("orchestrator") or {}).get("state") == "dispatched", \
+        "marker must survive while the child may still receive the inbox"
+    assert os.path.exists(inbox), "inbox must not be consumed while alive"
+    assert "pendingChat" not in t1
+
+    # Child dies without delivering: dead-process straggler path requeues.
+    monkeypatch.setattr(orch, "_process_alive", lambda _pid: False)
+    orch.tick(kanban, opus_triage=lambda *a, **k: {"dispatch": []})
+
+    t2 = _read(p)
+    assert t2["status"] == "ready"
+    assert [m["message"] for m in t2["pendingChat"]] == ["late steer"]
+    assert "orchestrator" not in t2
+    assert not os.path.exists(inbox)
+
+
 def test_self_completed_ticket_no_pending_stays_completed(kanban, monkeypatch):
     pid = 9005
     p = _set_dispatched(kanban, "1", pid)
