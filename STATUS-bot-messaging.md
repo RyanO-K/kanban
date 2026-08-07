@@ -58,3 +58,43 @@ Gaps vs Ryan's request, now closed:
   `docs/plans/2026-07-03-agent-chat.md` "Manual verification"; the new UI path adds:
   open a running ticket, send a message, watch it flip queued → delivered, and check a
   killed run's messages appear as a comment + "queued for next run".
+
+## Verification pass (2026-08-07)
+
+Independent re-verification of the 5 feature commits (db07f7e..f30b173), resumed after
+the previous verifier was killed mid-review.
+
+- Safety: port 8745 free, no `kanban_server.py`/`orchestrator.py` running; repo on
+  `release`, clean tree at start. No ticket `*.json` touched or committed.
+- Baseline re-run: **489 passed in 145.93s** (`py -m pytest tests -q`) — matches the
+  claimed baseline exactly.
+- Code review findings (checked: `.pos` sidecar crash semantics, requeue loop safety,
+  stop-all cleanup, GET on bad board/ticket, UI poll lifecycle, pump-vs-reap races):
+  - Confirmed sound: batch-granular `.pos` (crash mid-batch re-surfaces at-most-once →
+    duplicate-not-lost, as documented); requeue cannot loop on the same guidance
+    (`_dispatch_one` pops `pendingChat` after building the prompt and persists the pop;
+    re-queue only fires when a fresh inbox holds undelivered bytes); stop-all order is
+    kill → release (keeps pending inbox) → surface (consumes it); CRLF/byte-offset
+    accounting agrees between `_tail_new_lines` and `chat_split_messages`; GET/POST 404
+    on unknown board/ticket via `safe_name` + isfile; UI timers are stopped on both
+    `closePanel` and every `renderPanel`.
+  - **Bug fixed (03ad4c2):** the #48 stale-marker guard cleared the marker even while
+    the self-completed child was still ALIVE with an undelivered inbox. If the child
+    then died before the pump delivered, the inbox was orphaned (marker-less tickets
+    are never re-reaped) and silently wiped by the next dispatch — the exact loss this
+    feature exists to prevent. The guard now defers the marker clear until the inbox
+    drains or the process dies (bounded: POST 409s on a done ticket). +1 regression
+    test in `tests/test_chat_requeue.py`.
+  - **Bug fixed (95261a6):** `pollChat`'s post-await guard only checked that
+    `#spChatList` existed, so switching the panel to another ticket mid-flight let the
+    OLD ticket's queue render into the NEW ticket's chat list (persistent on the
+    no-timer snapshot path). Polls are now keyed by `board|id` and stale responses
+    dropped. `node --check` clean.
+- Live smoke (scratch-port handler harness on 127.0.0.1:8807 against a temp board tree,
+  real `KanbanHandler`, never the real server): **14/14 checks passed** — GET 404s
+  (bad board / bad ticket / malformed path), GET running-empty shape
+  `{"enabled":true,"running":true,"messages":[],"nextRun":[]}`, POST 200 + inbox file,
+  queued→delivered flip when `.pos` = inbox size, delivered/queued split across the
+  offset, POST 400 blank / 409 not-running / 404 bad board, and `nextRun` from
+  `pendingChat` on an idle ticket.
+- Full suite after fixes: **490 passed in 147.68s** (489 + 1 new regression test).
