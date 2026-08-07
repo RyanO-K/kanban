@@ -619,8 +619,8 @@ function bindLogToggle(task,srcFile){
 // in progress). The panel polls the GET queue-status endpoint to show queued
 // vs delivered; guidance a run never received rides the ticket's pendingChat
 // into the next run's prompt ("queued for next run").
-const chatPoll={timer:null};
-function stopChatPoll(){ if(chatPoll.timer){clearInterval(chatPoll.timer);chatPoll.timer=null;} }
+const chatPoll={timer:null,key:null}; // key = board|taskId the poll belongs to
+function stopChatPoll(){ chatPoll.key=null; if(chatPoll.timer){clearInterval(chatPoll.timer);chatPoll.timer=null;} }
 function chatItem(m,state){
   const cls=state==="delivered"?"delivered":(state==="queued"?"queued":"nextrun");
   const label=state==="nextrun"?"queued for next run":state;
@@ -643,16 +643,20 @@ function renderChatList(data){
   if(nearBottom)box.scrollTop=box.scrollHeight;
 }
 async function pollChat(board,taskId){
-  if(!$("spChatList"))return; // panel re-rendered/closed without our section
+  const key=board+"|"+taskId;
+  if(chatPoll.key!==key||!$("spChatList"))return; // panel re-rendered/closed without our section
   try{
     const data=await apiFetch("/api/orchestrator/chat/"+encodeURIComponent(board)+"/"+encodeURIComponent(taskId));
-    if(!$("spChatList"))return; // closed mid-flight
+    // Re-check after the await: the panel may have closed or moved to ANOTHER
+    // ticket mid-flight (whose own spChatList exists) — never paint stale data.
+    if(chatPoll.key!==key||!$("spChatList"))return;
     renderChatList(data);
     if(!data.running)stopChatPoll(); // agent finished — stop hammering
   }catch(e){ /* transient; next tick retries */ }
 }
 function startChatPoll(board,taskId){
   stopChatPoll();
+  chatPoll.key=board+"|"+taskId;
   pollChat(board,taskId);
   chatPoll.timer=setInterval(()=>pollChat(board,taskId),2000);
 }
@@ -828,6 +832,9 @@ function renderPanel(task){
       });
       startChatPoll(srcFile,String(task.id));
     }else{
+      // One snapshot fetch (agent idle, pendingChat waiting) — key it so a
+      // stale in-flight response for another ticket can't paint over it.
+      chatPoll.key=srcFile+"|"+String(task.id);
       pollChat(srcFile,String(task.id));
     }
   }
