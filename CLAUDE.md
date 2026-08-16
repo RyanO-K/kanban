@@ -311,6 +311,27 @@ triage prompt (`orchestrator_triage_prompt.md`).
   (instant if the PID is alive, else queued via `killRequested`). The loop also reaps stalled
   agents on its own (gated by a productivity check).
 
+## Layrr live edit
+
+Per-board point-and-click editing: Project Settings holds a `layrr` block on
+`_meta.json` (`targetPort`, `projectRoot`, `baseBranch`, optional `model`) and a
+**Go live** button. The server (`app/layrr_launcher.py`) attaches the layrr
+overlay proxy to a dev server **already listening** on `targetPort` (it never
+starts the dev server itself), auto-allocating proxy ports from 4567. Each edit
+request submitted in the overlay becomes a ticket on that board (agent swap in
+`app/layrr/kanban-agent.mjs`, stamped with the board's default `model` when set);
+an injected widget (`static/layrr-widget.js`) shows those tickets' live status
+inside the proxied app. Endpoints: `POST /api/layrr/start/<board>`,
+`GET /api/layrr/status`, `POST /api/layrr/stop/<id>`. Instances persist in
+`_orchestrator/layrr.json` (logs in `_orchestrator/layrr-logs/`), survive server
+restarts via port-probe adoption, and several may be live at once — one topbar
+chip each. Three patches are re-applied to the resolved layrr install before
+every spawn (git-write guard, kanban sink, widget injection); the guard is kept
+byte-identical to b2-react's `dev:layrr` copy so shared installs don't fight.
+start() returns before the proxy answers (the single-threaded server would
+deadlock waiting — layrr's preflight calls back into `/api/files`); the UI polls
+status until the port opens.
+
 ## Performance tab
 
 The **Performance** tab (`perf_monitor.py` + `GET /api/performance`) discovers every
