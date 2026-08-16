@@ -20,6 +20,9 @@
   <button class="add-btn" id="markAllReadBtn" style="display:none;background:var(--surface-alt);color:var(--text);" title="Mark all unread tickets as read">&#x2713; Mark all read</button>
   <button class="add-btn" id="addBtn">+ New Task</button>
   <div class="status-indicator">
+    <!-- One chip per live layrr overlay (board + proxy port). Click opens the
+         overlay; ✕ stops it. Populated by renderLayrrChips() from /api/layrr/status. -->
+    <div id="layrrChips" style="display:flex;gap:6px;align-items:center;"></div>
     <!-- Ticket #3: notification bell — count of blocked tickets awaiting a human
          decision. Badge hidden at 0; click opens the Needs-attention modal. -->
     <button class="bell-btn" id="bellBtn" type="button" aria-label="Blocked tickets needing input" title="No tickets need your input">
@@ -172,6 +175,34 @@
           </label>
           <div style="font-size:11px;color:var(--text-muted);margin:-6px 0 14px;"><strong>Names only</strong> — the <em>value</em> of each is read from the orchestrator's own environment at dispatch and forwarded with <code>docker run -e NAME</code>. Nothing is ever written to <code>_meta.json</code>, the env-file, or the image. Use this for secrets (GitHub push token, <code>DATABASE_URL</code>, <code>RENDER_API_KEY</code>, Discord token); a listed name absent from the orchestrator env is skipped with a warning in the run log. Anthropic credentials are always forwarded automatically. Stored as <code>passthroughEnv</code> on _meta.json.</div>
           </div>
+          <!-- Layrr live edit: attach the point-and-click overlay to a dev server
+               that is ALREADY hosting this project's site. Persisted as `layrr`
+               on _meta.json; Go live hits POST /api/layrr/start/<board>. -->
+          <hr style="border:none;border-top:1px solid var(--surface-alt);margin:4px 0 12px;">
+          <div style="font-weight:600;margin-bottom:10px;">&#x26A1; Layrr live edit</div>
+          <label class="form-label">Dev server port
+            <input type="number" id="bLayrrPort" class="form-input" min="1" max="65535" placeholder="e.g. 5273">
+          </label>
+          <div style="font-size:11px;color:var(--text-muted);margin:-6px 0 14px;">The port <strong>already hosting</strong> the site you want to edit. Go live puts the layrr proxy in front of it — it does not start the dev server for you.</div>
+          <label class="form-label">Project root (worktree serving that port)
+            <input type="text" id="bLayrrRoot" class="form-input" placeholder="e.g. C:\...\.worktrees\b2-react-layrr\...\b2react">
+          </label>
+          <div style="font-size:11px;color:var(--text-muted);margin:-6px 0 14px;">The checkout the dev server is serving from — layrr maps clicks back to source files in this tree.</div>
+          <label class="form-label">Base branch
+            <input type="text" id="bLayrrBranch" class="form-input" placeholder="working">
+          </label>
+          <div style="font-size:11px;color:var(--text-muted);margin:-6px 0 14px;">Integration branch agents merge finished tickets into (and that this worktree serves), so edits show up live for review.</div>
+          <label class="form-label">Default model for layrr tickets
+            <select id="bLayrrModel" class="form-input">
+              <option value="">(default - orchestrator decides)</option>
+            </select>
+          </label>
+          <div style="font-size:11px;color:var(--text-muted);margin:-6px 0 14px;">Every ticket layrr files gets this model override; leave on default to let triage pick per ticket.</div>
+          <div style="display:flex;gap:10px;align-items:center;margin-bottom:6px;">
+            <button type="button" class="btn btn-create" id="bLayrrGoLive">&#x26A1; Go live</button>
+            <span id="bLayrrStatus" style="font-size:12px;color:var(--text-muted);"></span>
+          </div>
+          <div id="bLayrrInstances" style="font-size:12px;"></div>
         </div>
       </div>
       <div class="form-actions">

@@ -28,6 +28,7 @@ from urllib.request import Request, urlopen
 
 import orchestrator_core as _oc
 import perf_monitor
+import layrr_launcher as _layrr
 
 
 def _atomic_write_json(path, data):
@@ -49,6 +50,14 @@ def _atomic_write_json(path, data):
 
 # --- Config ---
 PORT = 8745
+# The port this process actually bound (set by main(); argv/env/server.json can
+# all move it off the default). Spawned layrr instances call back into the API
+# (ticket filing, widget polling), so they need our real base URL, not PORT.
+BOUND_PORT = None
+
+
+def kanban_base_url():
+    return f"http://127.0.0.1:{BOUND_PORT or PORT}"
 # Bind to loopback by default so the board is not reachable from other LAN hosts
 # (the API exposes destructive endpoints: perf_kill, server/restart, DELETE task).
 # Override with KANBAN_HOST=0.0.0.0 to expose it deliberately on a trusted network.
@@ -83,6 +92,8 @@ STATIC_DIR = os.path.join(KANBAN_DIR, "static")
 HTML_PATH = os.path.join(STATIC_DIR, "kanban.html")
 CSS_PATH = os.path.join(STATIC_DIR, "kanban.css")
 JS_PATH = os.path.join(STATIC_DIR, "kanban.js")
+# Ticket widget injected into layrr-proxied pages (see layrr_launcher.py).
+LAYRR_WIDGET_PATH = os.path.join(STATIC_DIR, "layrr-widget.js")
 META_FILE = "_meta.json"
 # Board directories live under a dedicated `boards/` folder (ticket #94), which
 # is gitignored — keeping the .kanban root clean of loose board dirs mixed in
@@ -631,7 +642,7 @@ def load_board(slug):
     # Pass through optional board-level metadata if present.
     for key in ("context", "openQuestions", "outOfScope", "commitRequirements",
                 "directory", "useWorktrees", "useDocker", "envVars",
-                "passthroughEnv"):
+                "passthroughEnv", "layrr"):
         if key in meta:
             result[key] = meta[key]
     # Surface the one-paragraph context blurb as a flat field for the settings
@@ -696,9 +707,12 @@ def board_get(slug, since=None):
 # orchestrator env, never on disk). The flat `description` field is handled
 # specially (merged into `context.description`); `envVars` and `passthroughEnv`
 # are sanitized specially (a dict / a list of names, not a scalar) just below.
+# `layrr` is the per-board live-edit block ({targetPort, projectRoot,
+# baseBranch, column}) consumed by layrr_launcher.start(); sanitized specially
+# below (a dict of typed fields, not a scalar).
 EDITABLE_META_FIELDS = ("project", "context", "openQuestions", "outOfScope",
                         "commitRequirements", "directory", "useWorktrees",
-                        "useDocker", "envVars", "passthroughEnv")
+                        "useDocker", "envVars", "passthroughEnv", "layrr")
 
 
 def update_board_meta(slug, payload):
@@ -744,6 +758,15 @@ def update_board_meta(slug, payload):
             if isinstance(value, str):
                 value = [n for n in re.split(r"[\s,]+", value.strip()) if n]
             clean = _oc.board_passthrough_env({"passthroughEnv": value})
+            if clean:
+                meta[key] = clean
+            else:
+                meta.pop(key, None)
+            continue
+        # `layrr` is a typed settings dict (live-edit): sanitize field-by-field
+        # and remove the block entirely when nothing survives.
+        if key == "layrr":
+            clean = _layrr.sanitize_cfg(value)
             if clean:
                 meta[key] = clean
             else:
@@ -1193,6 +1216,19 @@ def server_restart():
 
     threading.Timer(0.3, _reexec).start()
     return {"ok": True}, 200
+
+
+def layrr_start(slug):
+    """POST /api/layrr/start/<slug> — go live per the board's `layrr` block."""
+    path, _safe = board_dir(slug)
+    if path is None or not is_board(path):
+        return {"error": "board not found"}, 404
+    try:
+        with open(os.path.join(path, META_FILE), "r", encoding="utf-8") as f:
+            meta = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        return {"error": str(e)}, 500
+    return _layrr.start(KANBAN_DIR, slug, meta, kanban_base_url())
 
 
 def orch_state_get():
@@ -1736,6 +1772,8 @@ class KanbanHandler(BaseHTTPRequestHandler):
             self._json(*orch_activity())
         elif path == "/api/performance":
             self._json(*perf_snapshot())
+        elif path == "/api/layrr/status":
+            self._json(*_layrr.status(KANBAN_DIR))
         elif path.startswith("/api/doc/"):
             text, status = read_doc(path[len("/api/doc/"):])
             if text is None:
@@ -1748,6 +1786,8 @@ class KanbanHandler(BaseHTTPRequestHandler):
             self._serve_static(CSS_PATH, "text/css; charset=utf-8")
         elif path == "/kanban.js":
             self._serve_static(JS_PATH, "application/javascript; charset=utf-8")
+        elif path == "/layrr-widget.js":
+            self._serve_static(LAYRR_WIDGET_PATH, "application/javascript; charset=utf-8")
         else:
             self.send_error(404)
 
@@ -1868,6 +1908,15 @@ class KanbanHandler(BaseHTTPRequestHandler):
         # POST /api/orchestrator/nudge — immediate tick
         elif len(parts) == 4 and parts[1] == "api" and parts[2] == "orchestrator" and parts[3] == "nudge":
             self._json(*orch_nudge())
+
+        # POST /api/layrr/start/<board> — go live: layrr proxy over the board's
+        # already-running dev server (config in the board's `layrr` meta block)
+        elif len(parts) == 5 and parts[1] == "api" and parts[2] == "layrr" and parts[3] == "start":
+            self._json(*layrr_start(unquote(parts[4])))
+
+        # POST /api/layrr/stop/<instance-id>
+        elif len(parts) == 5 and parts[1] == "api" and parts[2] == "layrr" and parts[3] == "stop":
+            self._json(*_layrr.stop(KANBAN_DIR, unquote(parts[4])))
 
         # POST /api/server/restart
         elif len(parts) == 4 and parts[1] == "api" and parts[2] == "server" and parts[3] == "restart":
@@ -2021,6 +2070,8 @@ def main():
         port = int(os.environ["KANBAN_PORT"])
     else:
         port = cfg["port"]
+    global BOUND_PORT
+    BOUND_PORT = port
     server = HTTPServer((host, port), KanbanHandler)
     print(f"Kanban server running at http://localhost:{port} (bound to {host})")
     print(f"Serving boards from: {KANBAN_DIR}")

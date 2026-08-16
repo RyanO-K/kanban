@@ -1529,6 +1529,14 @@ function openBoardModal(){
   $("bContainerSettings").style.display=d.useDocker===true?"":"none";
   $("bEnvVars").value=envMapToText(d.envVars);
   $("bPassthroughEnv").value=namesToText(d.passthroughEnv);
+  $("bLayrrPort").value=(d.layrr&&d.layrr.targetPort)||"";
+  $("bLayrrRoot").value=(d.layrr&&d.layrr.projectRoot)||"";
+  $("bLayrrBranch").value=(d.layrr&&d.layrr.baseBranch)||"";
+  // Rebuild from the live catalog on every open (MODEL_OPTIONS loads async).
+  $("bLayrrModel").innerHTML=MODEL_OPTIONS.map(m=>'<option value="'+m.value+'">'+m.label+'</option>').join("");
+  $("bLayrrModel").value=(d.layrr&&d.layrr.model)||"";
+  $("bLayrrStatus").textContent="";
+  renderLayrrModalInstances();
   $("boardModal").classList.add("open");
   setTimeout(()=>$("bProject").focus(),50);
 }
@@ -1541,12 +1549,137 @@ $("boardModal").addEventListener("click",e=>{if(e.target===$("boardModal"))close
 $("boardForm").addEventListener("submit",async e=>{
   e.preventDefault();
   if(!currentFile||currentFile==="__all__")return;
-  const payload={project:$("bProject").value.trim(),directory:$("bDirectory").value.trim(),description:$("bDescription").value.trim(),commitRequirements:$("bCommitReq").value.trim(),useWorktrees:$("bUseWorktrees").checked,useDocker:$("bUseDocker").checked,envVars:envTextToMap($("bEnvVars").value),passthroughEnv:textToNames($("bPassthroughEnv").value)};
+  const payload={project:$("bProject").value.trim(),directory:$("bDirectory").value.trim(),description:$("bDescription").value.trim(),commitRequirements:$("bCommitReq").value.trim(),useWorktrees:$("bUseWorktrees").checked,useDocker:$("bUseDocker").checked,envVars:envTextToMap($("bEnvVars").value),passthroughEnv:textToNames($("bPassthroughEnv").value),layrr:layrrCfgFromForm()};
   try{
     await apiFetch("/api/board/"+encodeURIComponent(currentFile)+"/meta",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
     showToast("Project settings saved");closeBoardModal();lastMtime=0;loadFiles();poll();
   }catch(err){showToast("Failed to save project settings",true);}
 });
+
+// ── Layrr live edit ─────────────────────────────────────────────
+// Board-level: the Project Settings modal saves a `layrr` block ({targetPort,
+// projectRoot, baseBranch}) and Go live asks the server to put the layrr
+// point-and-click overlay in front of the dev server ALREADY listening on that
+// port. Several overlays may be live at once (across boards/ports); each gets
+// a topbar chip next to the status pill linking to its proxy url.
+let layrrInstances=[];
+
+// apiFetch discards the response body on non-2xx, but layrr errors carry the
+// actionable text ("nothing is listening on port 5273 …") — surface it.
+async function layrrApi(url,opts){
+  opts=opts||{};
+  if(window.KANBAN_TOKEN){opts.headers=Object.assign({"X-Kanban-Token":window.KANBAN_TOKEN},opts.headers||{});}
+  const r=await fetch(url,opts);
+  let body=null;try{body=await r.json();}catch(e){}
+  if(!r.ok)throw new Error((body&&body.error)||("HTTP "+r.status));
+  return body;
+}
+
+function layrrCfgFromForm(){
+  const cfg={};
+  const port=parseInt($("bLayrrPort").value,10);
+  if(port>0)cfg.targetPort=port;
+  const root=$("bLayrrRoot").value.trim();if(root)cfg.projectRoot=root;
+  const br=$("bLayrrBranch").value.trim();if(br)cfg.baseBranch=br;
+  const model=$("bLayrrModel").value.trim();if(model)cfg.model=model;
+  return cfg;
+}
+
+async function refreshLayrr(){
+  try{
+    const d=await layrrApi("/api/layrr/status");
+    layrrInstances=d.instances||[];
+  }catch(e){layrrInstances=[];}
+  renderLayrrChips();
+  renderLayrrModalInstances();
+}
+
+function renderLayrrChips(){
+  const wrap=$("layrrChips");if(!wrap)return;
+  const html=layrrInstances.map(i=>{
+    const state=i.state==="running"?"running":i.state==="failed"?"failed":"starting";
+    const title=i.state==="failed"?(i.lastError||"layrr failed"):(i.board+" — "+i.state+"\n"+i.url);
+    return '<span class="layrr-chip '+state+'" title="'+esc(title)+'">'
+      +'<a href="'+esc(i.url)+'" target="_blank" rel="noopener">&#x26A1; '+esc(i.board)+' :'+esc(i.proxyPort)+'</a>'
+      +'<button type="button" data-layrr-stop="'+esc(i.id)+'" title="Stop this layrr overlay">&times;</button></span>';
+  }).join("");
+  // Re-render only on change so an open native link context menu isn't yanked away.
+  if(wrap._html!==html){wrap._html=html;wrap.innerHTML=html;}
+}
+
+function renderLayrrModalInstances(){
+  const wrap=$("bLayrrInstances");if(!wrap)return;
+  if(!$("boardModal").classList.contains("open"))return;
+  const mine=layrrInstances.filter(i=>i.board===currentFile);
+  wrap.innerHTML=mine.map(i=>
+    '<div class="layrr-inst">'
+    +'<span class="layrr-dot '+esc(i.state)+'"></span>'
+    +'<a href="'+esc(i.url)+'" target="_blank" rel="noopener">'+esc(i.url)+'</a>'
+    +'<span style="color:var(--text-muted);">dev :'+esc(i.targetPort)+' — '+esc(i.state)+'</span>'
+    +'<button type="button" class="btn btn-cancel" style="padding:2px 10px;font-size:11px;" data-layrr-stop="'+esc(i.id)+'">Stop</button>'
+    +'</div>').join("");
+}
+
+async function stopLayrr(id){
+  try{await layrrApi("/api/layrr/stop/"+encodeURIComponent(id),{method:"POST"});showToast("Layrr overlay stopped");}
+  catch(e){showToast("Failed to stop layrr: "+e.message,true);}
+  refreshLayrr();
+}
+document.addEventListener("click",e=>{
+  const b=e.target.closest("[data-layrr-stop]");
+  if(b){e.preventDefault();stopLayrr(b.getAttribute("data-layrr-stop"));}
+});
+
+// Poll /api/layrr/status every second until the instance answers, dies, or
+// *seconds* elapse. Returns the running instance, or null on timeout.
+async function waitForLayrr(id,seconds){
+  for(let n=0;n<seconds;n++){
+    await new Promise(r=>setTimeout(r,1000));
+    try{
+      const d=await layrrApi("/api/layrr/status");
+      layrrInstances=d.instances||[];
+    }catch(e){continue;}
+    renderLayrrChips();renderLayrrModalInstances();
+    const inst=layrrInstances.find(i=>i.id===id);
+    if(!inst)throw new Error("layrr exited during startup — see _orchestrator/layrr-logs/");
+    if(inst.state==="running")return inst;
+    if(inst.state==="failed")throw new Error(inst.lastError||"layrr failed to start");
+  }
+  return null;
+}
+
+$("bLayrrGoLive").addEventListener("click",async()=>{
+  if(!currentFile||currentFile==="__all__"){showToast("Select a specific board first",true);return;}
+  const st=$("bLayrrStatus"),btn=$("bLayrrGoLive");
+  btn.disabled=true;
+  try{
+    st.textContent="Saving settings…";
+    await apiFetch("/api/board/"+encodeURIComponent(currentFile)+"/meta",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({layrr:layrrCfgFromForm()})});
+    st.textContent="Starting layrr proxy…";
+    const r=await layrrApi("/api/layrr/start/"+encodeURIComponent(currentFile),{method:"POST"});
+    const inst=r.instance;
+    if(r.alreadyRunning){
+      st.innerHTML='Already live: <a href="'+esc(inst.url)+'" target="_blank" rel="noopener">'+esc(inst.url)+'</a>';
+      window.open(inst.url,"_blank");refreshLayrr();return;
+    }
+    st.textContent="Waiting for the overlay on "+inst.url+"…";
+    const up=await waitForLayrr(inst.id,60);
+    if(up){
+      st.innerHTML='Live: <a href="'+esc(up.url)+'" target="_blank" rel="noopener">'+esc(up.url)+'</a>';
+      // May be swallowed by a popup blocker (we're past the click gesture);
+      // the inline link and the topbar chip carry the same url either way.
+      window.open(up.url,"_blank");
+    }else{
+      st.textContent="Proxy still not answering after 60s — check _orchestrator/layrr-logs/.";
+    }
+  }catch(err){
+    st.textContent=err.message||"failed";
+    showToast("Go live failed",true);
+  }finally{btn.disabled=false;refreshLayrr();}
+});
+
+refreshLayrr();
+setInterval(refreshLayrr,5000);
 
 updateBoardSettingsBtn();
 loadFiles();
