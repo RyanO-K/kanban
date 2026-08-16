@@ -1104,6 +1104,32 @@ function animateExit(card){
   setTimeout(done,400); // safety net
 }
 
+// "Clear done": hide every done ticket via POST /api/board/<slug>/clear-done.
+// Files stay on disk (server stamps cleared:true and board payloads skip
+// cleared+done tickets). In the __all__ view the Done column mixes boards, so
+// clear each board that contributed a done ticket.
+async function clearDoneTickets(){
+  const done=currentTasks.filter(t=>t._column==="done");
+  if(!done.length){showToast("No done tickets to clear");return;}
+  const boards=[...new Set(done.map(t=>t._board||currentFile))].filter(b=>b&&b!=="__all__");
+  if(!boards.length)return;
+  const msg="Clear "+done.length+" done ticket"+(done.length===1?"":"s")
+    +(boards.length>1?" across "+boards.length+" boards":"")
+    +"? They stay on disk and just stop showing up.";
+  if(!confirm(msg))return;
+  let n=0;
+  try{
+    for(const b of boards){
+      const r=await apiFetch("/api/board/"+encodeURIComponent(b)+"/clear-done",{method:"POST"});
+      n+=r.cleared||0;
+    }
+    showToast("Cleared "+n+" done ticket"+(n===1?"":"s"));
+  }catch(e){
+    showToast("Failed to clear done tickets",true);
+  }
+  lastMtime=0;poll();
+}
+
 function renderBoard(data){
   const board=$("board");
   // Ticket #65: clear skeleton/placeholder nodes before keyed reconciliation runs.
@@ -1170,6 +1196,20 @@ function renderBoard(data){
       if(colEl._color!==col.color){colEl._color=col.color;colEl.style.setProperty("--col-color",col.color);}
       if(colEl._label!==col.label){colEl._label=col.label;hdr.innerHTML=col.label+' <span class="col-count">'+tasks.length+"</span>";}
       else{const b=colEl.querySelector(".col-count");const n=String(tasks.length);if(b.textContent!==n){b.textContent=n;popBadge(b);}}
+    }
+    // Done column: a persistent Clear button in the header (re-appended if a
+    // label-change rewrite of the header HTML ever drops it), shown only when
+    // there is something to clear.
+    if(col.key==="done"){
+      let cb=hdr.querySelector(".col-clear-btn");
+      if(!cb){
+        cb=document.createElement("button");
+        cb.type="button";cb.className="col-clear-btn";cb.textContent="Clear";
+        cb.title="Hide all done tickets — the ticket files are kept on disk";
+        cb.addEventListener("click",clearDoneTickets);
+        hdr.appendChild(cb);
+      }
+      cb.style.display=tasks.length?"":"none";
     }
     liveCols[col.key]=colEl;
     // Place the column at its data-defined position (reuses the node when already there).

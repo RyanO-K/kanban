@@ -434,3 +434,7 @@ body {
 .layrr-dot.starting { background:#f59e0b;animation:layrrPulse 1.2s infinite; }
 .layrr-dot.failed { background:#ef4444; }
 @keyframes layrrPulse { 50% { opacity:.35; } }
+
+/* Done-column Clear button (hide done tickets; files stay on disk) */
+.col-clear-btn { margin-left:auto;background:none;border:1px solid var(--surface-alt);border-radius:6px;color:var(--text-muted);font-size:10px;padding:1px 8px;cursor:pointer;line-height:1.6; }
+.col-clear-btn:hover { color:#ef4444;border-color:rgba(239,68,68,.5); }

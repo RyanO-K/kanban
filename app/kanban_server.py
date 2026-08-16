@@ -396,6 +396,18 @@ def write_ticket(path, task):
     _atomic_write_json(path, task)
 
 
+def is_cleared_task(task):
+    """True when a ticket should be hidden from board payloads.
+
+    "Clear done" (the Done-column broom button) stamps `cleared: true` on done
+    tickets — the file stays exactly where it is, it just stops showing up.
+    The done-column check makes the hide self-healing: if an agent later moves
+    a cleared ticket's status back to something active, it reappears without
+    anyone having to find and strip the flag.
+    """
+    return bool(task.get("cleared")) and get_task_column(task.get("status", "")) == "done"
+
+
 # --- Spec / plan discovery --------------------------------------------------
 #
 # A spec or plan is a markdown file under .kanban/docs/ that links itself to a
@@ -577,6 +589,8 @@ def load_all_boards():
                     task = json.load(f)
             except (json.JSONDecodeError, OSError):
                 continue
+            if is_cleared_task(task):
+                continue
             task["_column"] = get_task_column(task.get("status", ""))
             task["_board"] = slug
             task["_project"] = project
@@ -621,6 +635,8 @@ def load_board(slug):
             with open(tp, "r", encoding="utf-8") as f:
                 task = json.load(f)
         except (json.JSONDecodeError, OSError):
+            continue
+        if is_cleared_task(task):
             continue
         task["_column"] = get_task_column(task.get("status", ""))
         task["_board"] = safe
@@ -1088,6 +1104,39 @@ def delete_task(slug, task_id):
     touch_meta(path)
 
     return {"ok": True, "deletedId": task_id}, 200
+
+
+def clear_done_tasks(slug):
+    """POST /api/board/<slug>/clear-done — hide every done ticket on the board.
+
+    The files are not moved or deleted: each done ticket is stamped
+    `cleared: true` (+ `clearedAt`) in place, and board payloads skip tickets
+    that are cleared AND done (is_cleared_task). History, comments and id
+    numbering are all untouched.
+    """
+    path, _ = board_dir(slug)
+    if path is None or not is_board(path):
+        return {"error": "board not found"}, 404
+
+    cleared = 0
+    for tp in list_ticket_files(path):
+        try:
+            with open(tp, "r", encoding="utf-8") as f:
+                task = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            continue
+        if task.get("cleared") or get_task_column(task.get("status", "")) != "done":
+            continue
+        task["cleared"] = True
+        task["clearedAt"] = now_iso()
+        try:
+            write_ticket(tp, task)
+        except OSError:
+            continue
+        cleared += 1
+    if cleared:
+        touch_meta(path)
+    return {"ok": True, "cleared": cleared}, 200
 
 
 def add_comment(slug, task_id, payload):
@@ -1908,6 +1957,10 @@ class KanbanHandler(BaseHTTPRequestHandler):
         # POST /api/orchestrator/nudge — immediate tick
         elif len(parts) == 4 and parts[1] == "api" and parts[2] == "orchestrator" and parts[3] == "nudge":
             self._json(*orch_nudge())
+
+        # POST /api/board/<slug>/clear-done — hide all done tickets (files stay)
+        elif len(parts) == 5 and parts[1] == "api" and parts[2] == "board" and parts[4] == "clear-done":
+            self._json(*clear_done_tasks(unquote(parts[3])))
 
         # POST /api/layrr/start/<board> — go live: layrr proxy over the board's
         # already-running dev server (config in the board's `layrr` meta block)
