@@ -195,3 +195,35 @@ def test_disabling_use_docker_via_http_clears_container_config(server):
     assert board.get("useDocker") is False
     assert "envVars" not in board
     assert "passthroughEnv" not in board
+
+
+# --- showMergeBranch per-board toggle (ticket #109) --------------------------
+
+def test_update_sets_show_merge_branch_true(board_meta):
+    result, status = ks.update_board_meta("demo", {"showMergeBranch": True})
+    assert status == 200
+    with open(os.path.join(board_meta, "boards", "demo", "_meta.json"), encoding="utf-8") as f:
+        meta = json.load(f)
+    assert meta["showMergeBranch"] is True
+
+
+def test_update_sets_show_merge_branch_false(board_meta):
+    ks.update_board_meta("demo", {"showMergeBranch": True})
+    ks.update_board_meta("demo", {"showMergeBranch": False})
+    with open(os.path.join(board_meta, "boards", "demo", "_meta.json"), encoding="utf-8") as f:
+        meta = json.load(f)
+    assert meta["showMergeBranch"] is False
+
+
+def test_load_board_exposes_show_merge_branch(board_meta):
+    ks.update_board_meta("demo", {"showMergeBranch": True})
+    data, status = ks.load_board("demo")
+    assert status == 200
+    assert data["showMergeBranch"] is True
+
+
+def test_put_meta_show_merge_branch_survives_reload(server):
+    status, body = _req(server, "PUT", "/api/board/demo/meta", {"showMergeBranch": True})
+    assert status == 200
+    status, board = _req(server, "GET", "/api/board/demo")
+    assert board["showMergeBranch"] is True

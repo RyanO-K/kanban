@@ -249,19 +249,26 @@ async function loadFiles(){
 
 async function poll(){
   if(!currentFile)return;
+  // Capture the board this request is FOR. If the user switches boards while the
+  // response is in flight, the stale payload must not be rendered or cached under
+  // the new board's key — with the ?since= short-circuit an __all__ payload cached
+  // as a concrete board sticks (its mtime matches, so every later poll returns
+  // {"unchanged": true} and the wrong render is never corrected).
+  const file=currentFile;
   try{
     const since=lastMtime?"?since="+encodeURIComponent(lastMtime):"";
-    const data=await apiFetch("/api/board/"+encodeURIComponent(currentFile)+since);
+    const data=await apiFetch("/api/board/"+encodeURIComponent(file)+since);
+    if(file!==currentFile)return; // board switched mid-flight; drop the stale response
     if(!data.unchanged){
       currentBoardData=data;
       // Ticket #99: keep the cache warm so switching back to this board is instant.
-      boardCache[currentFile]={data,fetchedAt:Date.now()};
+      boardCache[file]={data,fetchedAt:Date.now()};
       if(data.mtime!==lastMtime){lastMtime=data.mtime;currentTasks=data.tasks||[];renderBoard(data);if(selectedTaskKey)refreshPanel();}
     }
     pillState.lastUpdated="Updated "+new Date().toLocaleTimeString();
     setServerDown(false);
     checkOrchStatus();
-  }catch(e){setServerDown(true);}
+  }catch(e){if(file===currentFile)setServerDown(true);}
 }
 // Ticket #99: startPolling optionally accepts cached board data so we can render
 // instantly on a board switch without waiting for a network round-trip. When
@@ -456,18 +463,23 @@ function refreshPanel(){
   // edit — that wipes the user's unsaved description/title text. Skip this poll's
   // re-render; the next poll after they save/cancel picks up server changes.
   if(panelHasOpenEdit())return;
-  // Preserve comment draft across re-renders
-  const draftMsg=$("spCMsg"),draftWriter=$("spCWriter");
+  // Preserve comment draft and branch input across re-renders
+  const draftMsg=$("spCMsg"),draftWriter=$("spCWriter"),draftBranch=$("spBranchInput");
   const savedMsg=draftMsg?draftMsg.value:"",savedWriter=draftWriter?draftWriter.value:"";
-  const wasFocused=document.activeElement===draftMsg||document.activeElement===draftWriter;
+  const savedBranch=draftBranch?draftBranch.value:null;
+  const wasFocused=document.activeElement===draftMsg||document.activeElement===draftWriter||document.activeElement===draftBranch;
   const focusedId=wasFocused?document.activeElement.id:null;
   renderPanel(t);
   if(savedMsg||savedWriter){
     const newMsg=$("spCMsg"),newWriter=$("spCWriter");
     if(newMsg)newMsg.value=savedMsg;
     if(newWriter)newWriter.value=savedWriter;
-    if(focusedId)$(focusedId).focus();
   }
+  if(savedBranch!==null){
+    const newBranch=$("spBranchInput");
+    if(newBranch)newBranch.value=savedBranch;
+  }
+  if(focusedId)$(focusedId).focus();
 }
 // ── Live logs poll ──────────────────────────────────────────────────────
 // A single active poll at a time. `logPoll.openKey` remembers which task's log
@@ -772,6 +784,18 @@ function renderPanel(task){
   if(task.claudeSessionId) html+='<div class="sp-field"><div class="sp-field-label">Claude Session</div><div class="sp-field-value sp-session-row"><code class="sp-session-id">'+esc(task.claudeSessionId)+'</code><button type="button" class="sp-copy-btn" id="spCopySession" title="Copy resume command">Copy resume cmd</button></div></div>';
   html+='<div class="sp-field" id="spDetailField"><div class="sp-field-label">Description <button type="button" class="sp-copy-btn sp-edit-detail-btn" id="spEditDetailBtn" title="Edit description" style="padding:2px 6px;margin-left:4px;">&#x270E;</button></div>'+(task.detail?'<div class="sp-detail" id="spDetailView">'+esc(task.detail)+'</div>':'<div class="sp-detail sp-detail-empty" id="spDetailView" style="color:var(--text-muted);font-style:italic;">No description</div>')+'</div>';
 
+  // Merge branch field — only when the board has showMergeBranch enabled.
+  const showMergeBranch=!!(currentBoardData&&currentBoardData.showMergeBranch);
+  if(showMergeBranch){
+    const isDone=task._column==="done";
+    const hasBranch=!!(task.mergeBranch&&task.mergeBranch.trim());
+    if(isDone&&hasBranch){
+      html+='<div class="sp-merge-banner">&#x26A1; Merge into <strong>'+esc(task.mergeBranch)+'</strong></div>';
+    }
+    html+='<div class="sp-field"><div class="sp-field-label">Branch</div>'
+      +'<input type="text" class="form-input sp-branch-input" id="spBranchInput" value="'+esc(task.mergeBranch||'')+'" placeholder="e.g. main, release-v2" style="font-size:12px;padding:4px 8px;"></div>';
+  }
+
   const deps=task.dependsOn?(Array.isArray(task.dependsOn)?task.dependsOn:[task.dependsOn]):[];
   if(deps.length||task.optional){
     html+='<div class="sp-field"><div class="sp-field-label">Tags</div><div class="sp-tags">';
@@ -897,6 +921,26 @@ function renderPanel(task){
   // Title edit button
   const titleEditBtn=$("spTitleEditBtn");
   if(titleEditBtn) titleEditBtn.addEventListener("click",()=>startTitleEdit(task,srcFile));
+
+  // Branch input: save on blur or Enter
+  const branchInput=$("spBranchInput");
+  if(branchInput){
+    let branchSaved=branchInput.value;
+    const saveBranch=async()=>{
+      const val=branchInput.value.trim();
+      if(val===branchSaved)return;
+      try{
+        await updateTaskFields(srcFile,String(task.id),{mergeBranch:val});
+        task.mergeBranch=val||undefined;
+        branchSaved=val;
+      }catch(e){}
+    };
+    branchInput.addEventListener("blur",saveBranch);
+    branchInput.addEventListener("keydown",e=>{
+      if(e.key==="Enter"){e.preventDefault();branchInput.blur();}
+      else if(e.key==="Escape"){branchInput.value=branchSaved;branchInput.blur();}
+    });
+  }
 
   // Description inline edit
   const editDetailBtn=$("spEditDetailBtn");
@@ -1567,6 +1611,7 @@ function openBoardModal(){
   $("bUseWorktrees").checked=d.useWorktrees===true;
   $("bUseDocker").checked=d.useDocker===true;
   $("bContainerSettings").style.display=d.useDocker===true?"":"none";
+  $("bShowMergeBranch").checked=d.showMergeBranch===true;
   $("bEnvVars").value=envMapToText(d.envVars);
   $("bPassthroughEnv").value=namesToText(d.passthroughEnv);
   $("bLayrrPort").value=(d.layrr&&d.layrr.targetPort)||"";
@@ -1589,7 +1634,7 @@ $("boardModal").addEventListener("click",e=>{if(e.target===$("boardModal"))close
 $("boardForm").addEventListener("submit",async e=>{
   e.preventDefault();
   if(!currentFile||currentFile==="__all__")return;
-  const payload={project:$("bProject").value.trim(),directory:$("bDirectory").value.trim(),description:$("bDescription").value.trim(),commitRequirements:$("bCommitReq").value.trim(),useWorktrees:$("bUseWorktrees").checked,useDocker:$("bUseDocker").checked,envVars:envTextToMap($("bEnvVars").value),passthroughEnv:textToNames($("bPassthroughEnv").value),layrr:layrrCfgFromForm()};
+  const payload={project:$("bProject").value.trim(),directory:$("bDirectory").value.trim(),description:$("bDescription").value.trim(),commitRequirements:$("bCommitReq").value.trim(),useWorktrees:$("bUseWorktrees").checked,useDocker:$("bUseDocker").checked,envVars:envTextToMap($("bEnvVars").value),passthroughEnv:textToNames($("bPassthroughEnv").value),layrr:layrrCfgFromForm(),showMergeBranch:$("bShowMergeBranch").checked};
   try{
     await apiFetch("/api/board/"+encodeURIComponent(currentFile)+"/meta",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
     showToast("Project settings saved");closeBoardModal();lastMtime=0;loadFiles();poll();
@@ -1750,9 +1795,10 @@ document.querySelectorAll(".view-tab").forEach(b=>b.addEventListener("click",()=
 async function renderProfiles(){
   const wrap = $("view-profiles");
   wrap.innerHTML = "<div style='color:#64748b'>Loading…</div>";
-  let profiles=[], state={};
+  let profiles=[], state={}, serverCfg={};
   try{ profiles = (await apiFetch("/api/profiles")).profiles||[]; }catch(e){}
   try{ state = await apiFetch("/api/orchestrator/state"); }catch(e){}
+  try{ serverCfg = await apiFetch("/api/server/config"); }catch(e){}
   let html = '<p class="setup-section">Concurrency</p>';
   html += '<div class="setup-grid">';
   html += '<div class="setup-field"><label>Max agents in flight</label>'
@@ -1771,6 +1817,20 @@ async function renderProfiles(){
         + '<input type="number" id="triageTimeoutSecondsInput" min="30" max="600" value="'+(state.triageTimeoutSeconds??120)+'">'
         + '<button class="add-btn" id="triageTimeoutSecondsSave">Save</button></div>';
   html += '</div>';
+  html += '<hr class="setup-divider">';
+  html += '<p class="setup-section">Server CPU cap</p>';
+  html += '<div style="color:var(--text-muted);font-size:11px;margin-bottom:10px;max-width:520px;">'
+        + 'Kernel hard cap on the server process (percent of total system CPU across all cores). '
+        + '0 disables the cap. Applies live — no restart needed. Dispatched agents run uncapped.</div>';
+  html += '<div class="setup-grid">';
+  html += '<div class="setup-field"><label>CPU limit (%)</label>'
+        + '<input type="number" id="cpuLimitInput" min="0" max="100" value="'+(serverCfg.cpuLimitPercent??serverCfg.effectivePercent??5)+'">'
+        + '<button class="add-btn" id="cpuLimitSave">Save</button></div>';
+  html += '</div>';
+  if(serverCfg.envOverride){
+    html += '<div style="color:var(--warn,#f59e0b);font-size:11px;margin:-8px 0 12px;max-width:520px;">'
+          + 'KANBAN_CPU_LIMIT is set in the environment and overrides this value — your edit is saved but the env var wins until it is unset.</div>';
+  }
   html += '<hr class="setup-divider">';
   html += '<p class="setup-section">Loop models</p>';
   html += '<div style="color:var(--text-muted);font-size:11px;margin-bottom:10px;max-width:520px;">'
@@ -1816,6 +1876,12 @@ async function renderProfiles(){
       body:JSON.stringify({triageTimeoutSeconds:parseInt($("triageTimeoutSecondsInput").value,10)||120})});
     showToast("LLM timeout saved");}
     catch(e){showToast("Failed to save LLM timeout",true);}
+  });
+  $("cpuLimitSave").addEventListener("click", async ()=>{
+    try{const r=await apiFetch("/api/server/config",{method:"PUT",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({cpuLimitPercent:parseInt($("cpuLimitInput").value,10)||0})});
+    showToast(r.applied?("CPU cap set to "+r.effectivePercent+"%"):"CPU cap saved (applies on restart)");}
+    catch(e){showToast("Failed to save CPU cap",true);}
   });
   $("triageModelSave").addEventListener("click", async ()=>{
     try{await apiFetch("/api/orchestrator/state",{method:"PUT",headers:{"Content-Type":"application/json"},
@@ -2096,6 +2162,7 @@ async function renderOrchestrator(){
 function questionCard(t){
   const q=t.orchestrator.question;
   const card=document.createElement("div");
+  card.dataset.qkey=t._board+":"+t.id;
   card.style.cssText="background:var(--surface);border-left:3px solid #ef4444;border-radius:6px;padding:12px;margin-bottom:10px;";
   card.innerHTML='<div style="font-weight:600;">#'+esc(t.id)+' '+esc(t.title)+'</div>'
     +'<div style="margin:6px 0;color:var(--text-muted);font-size:13px;">'+esc(q.prompt)+'</div>';
@@ -2148,7 +2215,54 @@ async function refreshAttention(){
   catch(e){ return; }  // server down — keep last-known count; the status pill shows offline
   attentionTasks=(all.tasks||[]).filter(t=>t.orchestrator&&t.orchestrator.question&&!t.orchestrator.question.answer);
   updateBell();
-  if($("bellModal").classList.contains("open")) renderBellInbox();
+  // Only rebuild the open modal when the question set actually changed — an
+  // unconditional rebuild every poll tick wiped the user's half-typed answer.
+  if($("bellModal").classList.contains("open") && attentionSig()!==_bellRenderedSig) renderBellInbox();
+}
+
+// Identity of the rendered question set: which tickets are asking, and what.
+// Anything not captured here (e.g. ticket title) won't trigger a live rebuild.
+function attentionSig(){
+  return attentionTasks.map(t=>{
+    const q=t.orchestrator.question;
+    return JSON.stringify([t._board,t.id,q.type,q.multi?1:0,q.prompt,q.options||[]]);
+  }).join("\n");
+}
+let _bellRenderedSig=null;
+
+// Draft answers survive a rebuild: capture per-card input/notes/choices (+focus
+// and caret) keyed by board:id, and put them back on the recreated cards.
+function saveBellDrafts(inbox){
+  const drafts={};
+  inbox.querySelectorAll("[data-qkey]").forEach(card=>{
+    const s={checked:[...card.querySelectorAll("input:checked")].map(i=>i.value)};
+    const inp=card.querySelector("input.form-input"); if(inp) s.value=inp.value;
+    const notes=card.querySelector("textarea"); if(notes) s.notes=notes.value;
+    const ae=document.activeElement;
+    if(card.contains(ae)&&(ae===inp||ae===notes)){
+      s.focus=(ae===notes)?"notes":"input";
+      if(typeof ae.selectionStart==="number"){ s.selStart=ae.selectionStart; s.selEnd=ae.selectionEnd; }
+    }
+    drafts[card.dataset.qkey]=s;
+  });
+  return drafts;
+}
+function restoreBellDrafts(inbox,drafts){
+  inbox.querySelectorAll("[data-qkey]").forEach(card=>{
+    const s=drafts[card.dataset.qkey]; if(!s) return;
+    (s.checked||[]).forEach(v=>{
+      const opt=[...card.querySelectorAll('input[type=radio],input[type=checkbox]')].find(i=>i.value===v);
+      if(opt) opt.checked=true;
+    });
+    const inp=card.querySelector("input.form-input"); if(inp&&s.value!==undefined) inp.value=s.value;
+    const notes=card.querySelector("textarea"); if(notes&&s.notes!==undefined) notes.value=s.notes;
+    const target=s.focus==="notes"?notes:(s.focus==="input"?inp:null);
+    if(target){
+      target.focus();
+      // number inputs throw on setSelectionRange
+      if(typeof s.selStart==="number") try{ target.setSelectionRange(s.selStart,s.selEnd); }catch(e){}
+    }
+  });
 }
 
 function updateBell(){
@@ -2171,12 +2285,15 @@ function updateBell(){
 function renderBellInbox(){
   const inbox=$("bellInbox");
   if(!inbox) return;
+  const drafts=saveBellDrafts(inbox);
   inbox.innerHTML="";
+  _bellRenderedSig=attentionSig();
   if(!attentionTasks.length){
     inbox.innerHTML='<div style="color:var(--text-muted);font-size:13px;text-align:center;padding:28px 12px;">&#x2713; All caught up — nothing needs your input.</div>';
     return;
   }
   attentionTasks.forEach(t=>inbox.appendChild(questionCard(t)));
+  restoreBellDrafts(inbox,drafts);
 }
 
 function openBellModal(){ renderBellInbox(); $("bellModal").classList.add("open"); }

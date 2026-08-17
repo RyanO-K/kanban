@@ -297,16 +297,56 @@ def test_promotable_deps_resolved_per_board():
     assert ("B", "1") in promo
 
 
-def test_not_promotable_todo_without_model():
-    """A todo ticket without a real model is NOT promotable (ticket #100)."""
+def test_promotable_todo_without_model_is_eligible_for_triage():
+    """Ticket #108: a no-model todo ticket (deps met) IS promotable so it reaches
+    initial triage — that is the step that assigns the model. Filtering it out here
+    (as ticket #100 did) left it stuck in todo forever (the deadlock). The model
+    gate now lives in the promotion step (`apply_initial_triage`), not here."""
     tasks = [
         {"id": "1", "status": "todo", "model": "claude-opus-4-8"},
         {"id": "2", "status": "todo"},  # no model
         {"id": "3", "status": "todo", "model": ""},  # empty model
         {"id": "4", "status": "todo", "model": "  "},  # whitespace only
     ]
-    promo_ids = [t["id"] for t in oc.promotable_tickets(tasks)]
-    assert promo_ids == ["1"]
+    promo_ids = sorted(t["id"] for t in oc.promotable_tickets(tasks))
+    assert promo_ids == ["1", "2", "3", "4"]
+
+
+def test_apply_initial_triage_assigns_model_when_missing():
+    """Triage's model fills a no-model ticket, making it ready-eligible (True)."""
+    t = {"id": "2", "status": "todo"}
+    assert oc.apply_initial_triage(t, {"model": "claude-sonnet-4-6"}) is True
+    assert t["model"] == "claude-sonnet-4-6"
+
+
+def test_apply_initial_triage_never_overwrites_pinned_model():
+    """A user-pinned model wins: triage must not replace an existing model
+    (ticket #108). Still ready-eligible since a real model is present."""
+    t = {"id": "1", "status": "todo", "model": "claude-opus-4-8"}
+    assert oc.apply_initial_triage(t, {"model": "claude-sonnet-4-6"}) is True
+    assert t["model"] == "claude-opus-4-8"
+
+
+def test_apply_initial_triage_no_model_stays_in_todo():
+    """If triage yields no usable model, the ticket is NOT ready-eligible (False)
+    and gains no model — preserving ticket #100's invariant that nothing enters
+    ready without a model."""
+    t = {"id": "2", "status": "todo"}
+    assert oc.apply_initial_triage(t, {}) is False
+    assert oc.apply_initial_triage(t, {"model": "  "}) is False
+    assert not (t.get("model") or "").strip()
+
+
+def test_apply_initial_triage_fills_depends_on_only_when_absent():
+    """Triage fills dependsOn when the ticket has none, but never clobbers deps
+    the user already set."""
+    fresh = {"id": "2", "status": "todo", "model": "m"}
+    oc.apply_initial_triage(fresh, {"dependsOn": ["9"]})
+    assert fresh["dependsOn"] == ["9"]
+
+    pinned = {"id": "3", "status": "todo", "model": "m", "dependsOn": ["1"]}
+    oc.apply_initial_triage(pinned, {"dependsOn": ["9"]})
+    assert pinned["dependsOn"] == ["1"]
 
 
 def test_eligible_dispatches_from_ready_not_todo():

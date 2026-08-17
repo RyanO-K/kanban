@@ -17,6 +17,7 @@ import json
 import os
 import re
 import secrets
+import subprocess
 import sys
 import threading
 import time
@@ -198,6 +199,7 @@ DEFAULT_MODELS = [
     {"value": "claude-haiku-4-5-20251001", "label": "Haiku (small)"},
     {"value": "claude-sonnet-4-6", "label": "Sonnet (medium)"},
     {"value": "claude-opus-4-8", "label": "Opus (large)"},
+    {"value": "claude-fable-5", "label": "Fable 5"},
 ]
 
 MODELS_API_URL = "https://api.anthropic.com/v1/models"
@@ -215,7 +217,8 @@ def discover_models(api_key=None, url=None, timeout=MODELS_API_TIMEOUT, opener=N
     sorted by id for a stable picklist order.
     """
     if api_key is None:
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        api_key = (os.environ.get("ANTHROPIC_API_KEY")
+                   or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
     if not api_key:
         return list(DEFAULT_MODELS)
 
@@ -658,7 +661,7 @@ def load_board(slug):
     # Pass through optional board-level metadata if present.
     for key in ("context", "openQuestions", "outOfScope", "commitRequirements",
                 "directory", "useWorktrees", "useDocker", "envVars",
-                "passthroughEnv", "layrr"):
+                "passthroughEnv", "layrr", "showMergeBranch"):
         if key in meta:
             result[key] = meta[key]
     # Surface the one-paragraph context blurb as a flat field for the settings
@@ -728,7 +731,8 @@ def board_get(slug, since=None):
 # below (a dict of typed fields, not a scalar).
 EDITABLE_META_FIELDS = ("project", "context", "openQuestions", "outOfScope",
                         "commitRequirements", "directory", "useWorktrees",
-                        "useDocker", "envVars", "passthroughEnv", "layrr")
+                        "useDocker", "envVars", "passthroughEnv", "layrr",
+                        "showMergeBranch")
 
 
 def update_board_meta(slug, payload):
@@ -994,8 +998,8 @@ def update_task_model(slug, task_id, model):
     return {"ok": True, "taskId": task_id, "model": model}, 200
 
 
-def update_task_fields(slug, task_id, title, detail):
-    """Update a ticket's title and/or detail text. Either may be None to leave unchanged.
+def update_task_fields(slug, task_id, title, detail, merge_branch=None):
+    """Update a ticket's title, detail text, and/or mergeBranch. Any may be None to leave unchanged.
     Follows the re-read-before-write pattern so concurrent writes aren't clobbered."""
     path, _ = board_dir(slug)
     if path is None or not is_board(path):
@@ -1021,6 +1025,11 @@ def update_task_fields(slug, task_id, title, detail):
             task["detail"] = detail.strip()
         else:
             task.pop("detail", None)
+    if merge_branch is not None:
+        if merge_branch.strip():
+            task["mergeBranch"] = merge_branch.strip()
+        else:
+            task.pop("mergeBranch", None)
 
     try:
         write_ticket(tp, task)
@@ -1261,7 +1270,20 @@ def server_restart():
     stop_orchestrator()  # release single-instance lock for the new image
 
     def _reexec():
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+        # On Windows os.execv rebuilds the child's command line WITHOUT quoting
+        # its arguments, so an interpreter path containing a space — the default
+        # "C:\Program Files\Python312\python.exe" — is split at the space and the
+        # restart dies with `C:\Program: can't open file ...`. That silently
+        # kills the server (and its orchestrator loop) instead of restarting it.
+        # Spawn a fresh process there instead (Popen quotes argv correctly via
+        # CreateProcess) and exit this one; HTTPServer sets allow_reuse_address so
+        # the child rebinds the port while this socket is still closing. POSIX
+        # keeps the clean in-place execv (same PID, no rebind race).
+        if sys.platform == "win32":
+            subprocess.Popen([sys.executable] + sys.argv)
+            os._exit(0)
+        else:
+            os.execv(sys.executable, [sys.executable] + sys.argv)
 
     threading.Timer(0.3, _reexec).start()
     return {"ok": True}, 200
@@ -1311,6 +1333,69 @@ def orch_state_put(payload):
     if state.get("enabled"):
         ensure_orchestrator_running()
     return state, 200
+
+
+# --- Server config (CPU cap etc.) -------------------------------------------
+
+def _read_server_config_raw():
+    """Return the raw server.json dict (host/port/cpuLimitPercent), or {}."""
+    try:
+        with open(SERVER_CONFIG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def server_config_get():
+    """Expose the editable server settings the UI can tune (CPU cap).
+
+    `effectivePercent` is the cap actually in force after precedence (0 = no
+    cap). `envOverride` is true when KANBAN_CPU_LIMIT is set, in which case
+    edits to server.json are persisted but do not change what's applied.
+    """
+    import cpu_limiter
+    raw = _read_server_config_raw()
+    effective = cpu_limiter.resolve_limit_percent(SERVER_CONFIG_PATH)
+    return {
+        "cpuLimitPercent": raw.get("cpuLimitPercent"),
+        "effectivePercent": effective or 0,
+        "envOverride": os.environ.get("KANBAN_CPU_LIMIT") is not None,
+    }, 200
+
+
+def server_config_put(payload):
+    """Persist a new CPU cap to server.json and re-apply it live.
+
+    Preserves the other keys (host/port). The value is clamped to 0..100 (0
+    disables the cap). The live re-apply respects env precedence: what gets
+    applied is the resolved effective cap, so a KANBAN_CPU_LIMIT override still
+    wins even though the file is updated.
+    """
+    import cpu_limiter
+    if not isinstance(payload, dict) or "cpuLimitPercent" not in payload:
+        return {"error": "cpuLimitPercent required"}, 400
+    try:
+        percent = int(payload["cpuLimitPercent"])
+    except (TypeError, ValueError):
+        return {"error": "cpuLimitPercent must be an integer"}, 400
+    percent = max(0, min(percent, 100))
+
+    data = _read_server_config_raw()
+    data["cpuLimitPercent"] = percent
+    try:
+        _atomic_write_json(SERVER_CONFIG_PATH, data)
+    except OSError:
+        return {"error": "could not write server config"}, 500
+
+    effective = cpu_limiter.resolve_limit_percent(SERVER_CONFIG_PATH)
+    applied = cpu_limiter.set_cpu_limit(effective)
+    return {
+        "cpuLimitPercent": percent,
+        "effectivePercent": effective or 0,
+        "applied": bool(applied),
+        "envOverride": os.environ.get("KANBAN_CPU_LIMIT") is not None,
+    }, 200
 
 
 # --- Task 7: Activity, kill, answer -----------------------------------------
@@ -1817,6 +1902,8 @@ class KanbanHandler(BaseHTTPRequestHandler):
             self._json(*profile_get(name))
         elif path == "/api/orchestrator/state":
             self._json(*orch_state_get())
+        elif path == "/api/server/config":
+            self._json(*server_config_get())
         elif path == "/api/orchestrator/activity":
             self._json(*orch_activity())
         elif path == "/api/performance":
@@ -1873,6 +1960,11 @@ class KanbanHandler(BaseHTTPRequestHandler):
             if payload is None:
                 return
             self._json(*orch_state_put(payload))
+        elif len(parts) == 4 and parts[1] == "api" and parts[2] == "server" and parts[3] == "config":
+            payload = self._read_json()
+            if payload is None:
+                return
+            self._json(*server_config_put(payload))
         # PUT /api/board/<slug>/meta — edit board-level metadata
         elif len(parts) == 5 and parts[1] == "api" and parts[2] == "board" and parts[4] == "meta":
             slug = unquote(parts[3])
@@ -1900,11 +1992,12 @@ class KanbanHandler(BaseHTTPRequestHandler):
                 result, status = update_task_model(slug, task_id, payload.get("model", ""))
             elif "order" in payload:
                 result, status = update_task_order(slug, task_id, payload.get("order"))
-            elif "title" in payload or "detail" in payload:
+            elif "title" in payload or "detail" in payload or "mergeBranch" in payload:
                 result, status = update_task_fields(
                     slug, task_id,
                     payload.get("title"),
                     payload.get("detail"),
+                    payload.get("mergeBranch"),
                 )
             else:
                 result, status = update_task_status(slug, task_id, payload.get("column", ""))

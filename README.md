@@ -122,6 +122,11 @@ The percentage is of *all* cores combined — 5% on an 8-core machine allows
 the equivalent of 0.4 cores. Non-Windows platforms are unaffected (use
 cgroups / systemd `CPUQuota=` there).
 
+The cap is also editable live from the **Setup** tab ("Server CPU cap") — the
+new value is persisted to `server.json` and re-applied to the running Job Object
+immediately, no restart needed. When `KANBAN_CPU_LIMIT` is set the UI still saves
+your edit but flags that the env var overrides what's actually applied.
+
 ### Orchestrator Settings
 
 Configure in the UI's **Orchestrator** tab or edit `.kanban/_orchestrator/state.json`:

@@ -1486,13 +1486,18 @@ def test_tick_promotion_calls_initial_triage(kanban, monkeypatch):
 
 
 def test_tick_promotion_writes_triage_result_to_ticket(kanban, monkeypatch):
-    """The result of initial_triage (dependsOn + model) must be written to the
-    ticket file before it is marked ready.
-
-    RED against current code: the promotion loop never calls initial_triage and
-    never writes model/dependsOn to the ticket."""
+    """The result of initial_triage (model) must be written to a ticket that has
+    no model of its own before it is marked ready. (Ticket #108: triage only fills
+    a model when one is absent — see test_tick_promotion_preserves_pinned_model for
+    the not-overwrite case.)"""
     oc.write_state(kanban, {"enabled": False, "concurrencyCap": 3,
                             "stopAllRequested": False})
+    # Strip ticket 1's pinned model so triage is the one that supplies it.
+    p = os.path.join(kanban, "boards", "demo", "1.json")
+    t = _read(p)
+    t.pop("model", None)
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(t, f)
 
     def fake_initial_triage(kanban_dir, task, all_tasks):
         return {"dependsOn": [], "model": "claude-haiku-4-5-20251001"}
@@ -1500,10 +1505,11 @@ def test_tick_promotion_writes_triage_result_to_ticket(kanban, monkeypatch):
     orch.tick(kanban, opus_triage=lambda *a, **k: {"dispatch": []},
               initial_triage=fake_initial_triage)
 
-    t1 = _read(os.path.join(kanban, "boards", "demo", "1.json"))
+    t1 = _read(p)
     assert t1.get("model") == "claude-haiku-4-5-20251001", (
         f"model from triage must be written to the ticket, got {t1.get('model')!r}"
     )
+    assert t1["status"] == "ready"
 
 
 def test_tick_promotion_triage_sets_depends_on(kanban, monkeypatch):
@@ -1524,6 +1530,77 @@ def test_tick_promotion_triage_sets_depends_on(kanban, monkeypatch):
     assert t1.get("dependsOn") == ["99"], (
         f"dependsOn from triage must be written to the ticket, got {t1.get('dependsOn')!r}"
     )
+
+
+# --- Ticket #108: no-model todo tickets must reach initial triage ---
+
+def _write_ticket(kanban, ticket):
+    p = os.path.join(kanban, "boards", "demo", f"{ticket['id']}.json")
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(ticket, f)
+    return p
+
+
+def test_tick_no_model_ticket_gets_model_from_triage_and_promotes(kanban, monkeypatch):
+    """Ticket #108: a todo ticket with NO model reaches initial triage, gets a
+    model assigned, and is then promoted to ready — closing the deadlock where a
+    no-model ticket never reached the step that assigns its model."""
+    p = _write_ticket(kanban, {"id": "5", "title": "No model", "status": "todo"})
+    oc.write_state(kanban, {"enabled": False, "concurrencyCap": 3,
+                            "stopAllRequested": False})
+
+    def fake_initial_triage(kanban_dir, task, all_tasks):
+        return {"model": "claude-sonnet-4-6"}
+
+    orch.tick(kanban, opus_triage=lambda *a, **k: {"dispatch": []},
+              initial_triage=fake_initial_triage)
+
+    t5 = _read(p)
+    assert t5.get("model") == "claude-sonnet-4-6"
+    assert t5["status"] == "ready"
+
+
+def test_tick_no_model_ticket_triage_no_model_stays_todo(kanban, monkeypatch):
+    """Ticket #108: if triage assigns no model, the no-model ticket must NOT enter
+    ready (ticket #100 invariant). It stays in todo and an activity entry records
+    the failure so it is visible instead of silently stuck."""
+    p = _write_ticket(kanban, {"id": "5", "title": "No model", "status": "todo"})
+    oc.write_state(kanban, {"enabled": False, "concurrencyCap": 3,
+                            "stopAllRequested": False})
+
+    def fake_initial_triage(kanban_dir, task, all_tasks):
+        return {}  # triage could not produce a model
+
+    orch.tick(kanban, opus_triage=lambda *a, **k: {"dispatch": []},
+              initial_triage=fake_initial_triage)
+
+    t5 = _read(p)
+    assert t5["status"] == "todo", (
+        f"a no-model ticket must stay todo, got {t5['status']!r}")
+    assert not (t5.get("model") or "").strip()
+    acts = oc.read_activity(kanban)
+    assert any(a.get("kind") == "triage_no_model" and str(a.get("ticket")) == "5"
+               for a in acts), (
+        f"expected a triage_no_model activity entry for ticket 5, got {acts}")
+
+
+def test_tick_promotion_preserves_pinned_model(kanban, monkeypatch):
+    """Ticket #108: triage must never overwrite a user-pinned model. Ticket 1
+    carries a pinned model; triage suggests a different one; the pin wins and the
+    ticket still promotes."""
+    oc.write_state(kanban, {"enabled": False, "concurrencyCap": 3,
+                            "stopAllRequested": False})
+
+    def fake_initial_triage(kanban_dir, task, all_tasks):
+        return {"model": "claude-haiku-4-5-20251001"}
+
+    orch.tick(kanban, opus_triage=lambda *a, **k: {"dispatch": []},
+              initial_triage=fake_initial_triage)
+
+    t1 = _read(os.path.join(kanban, "boards", "demo", "1.json"))
+    assert t1.get("model") == "claude-opus-4-8", (
+        f"pinned model must be preserved, got {t1.get('model')!r}")
+    assert t1["status"] == "ready"
 
 
 def test_tick_promotion_triage_failure_still_promotes(kanban, monkeypatch):

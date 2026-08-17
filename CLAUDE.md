@@ -93,7 +93,10 @@ the orchestrator loop and perf sampler run as threads inside it and share the
 cap, but child processes (dispatched `claude` agents, git subprocesses) break
 away from the job at spawn (`JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK`) and run
 uncapped. Default 5% of total system CPU; resolved as `KANBAN_CPU_LIMIT` env
-> `server.json` `cpuLimitPercent` > default, `0` disables.
+> `server.json` `cpuLimitPercent` > default, `0` disables. Editable live from the
+**Setup** tab ("Server CPU cap") via `GET`/`PUT /api/server/config`, which persists
+`cpuLimitPercent` to `server.json` and re-applies the cap to the running Job Object
+(`cpu_limiter.set_cpu_limit`) without a restart.
 
 ---
 
