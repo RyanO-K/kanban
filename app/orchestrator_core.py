@@ -186,7 +186,9 @@ def parse_log_turns(text, n=20):
     for i, obj in enumerate(lines):
         if isinstance(obj, dict) and obj.get("timestamp"):
             line_ts.append((i, obj["timestamp"]))
-        content = (obj.get("message") or {}).get("content") if isinstance(obj, dict) else None
+        # system/permission_denied lines carry a plain-string `message`.
+        message = obj.get("message") if isinstance(obj, dict) else None
+        content = message.get("content") if isinstance(message, dict) else None
         if not isinstance(content, list):
             continue
         for block in content:
@@ -199,7 +201,9 @@ def parse_log_turns(text, n=20):
     for idx, obj in enumerate(lines):
         if not isinstance(obj, dict) or obj.get("type") != "assistant":
             continue
-        message = obj.get("message") or {}
+        message = obj.get("message")
+        if not isinstance(message, dict):
+            message = {}
         content = message.get("content")
         text_parts = []
         tools = []
