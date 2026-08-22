@@ -89,7 +89,7 @@ def test_commit_to_master_success(kanban, monkeypatch):
 
     monkeypatch.setattr(orch, "_run_git", fake_git)
     task = {"id": "36", "title": "Kanban auto commit", "_board": "kanban-dev",
-            "_path": os.path.join(kanban, "demo", "1.json")}
+            "_path": os.path.join(kanban, "boards", "demo", "1.json")}
     result = orch.commit_to_master(kanban, task, "did the thing")
     assert result["committed"] is True
     # It staged and committed (no branch checkout — stays on current branch/master).
@@ -105,7 +105,7 @@ def test_commit_to_master_is_best_effort_without_git(kanban, monkeypatch):
 
     monkeypatch.setattr(orch, "_run_git", boom)
     task = {"id": "36", "title": "Kanban auto commit", "_board": "kanban-dev",
-            "_path": os.path.join(kanban, "demo", "1.json")}
+            "_path": os.path.join(kanban, "boards", "demo", "1.json")}
     result = orch.commit_to_master(kanban, task, "summary")
     assert result["committed"] is False
     assert result["detail"]  # non-empty explanation
@@ -114,7 +114,7 @@ def test_commit_to_master_is_best_effort_without_git(kanban, monkeypatch):
 # --- tick completed path: kanban-only work commits to master ---
 
 def _set_dispatched(kanban, ticket_id, pid):
-    p = os.path.join(kanban, "demo", f"{ticket_id}.json")
+    p = os.path.join(kanban, "boards", "demo", f"{ticket_id}.json")
     t = _read(p)
     t["status"] = "in_progress"
     t["orchestrator"] = {"state": "dispatched", "pid": pid, "killRequested": False,
@@ -144,7 +144,7 @@ def test_completed_kanban_only_commits_to_master(kanban, monkeypatch):
     with open(p, "w", encoding="utf-8") as f:
         json.dump(t, f)
     # Board requires tests pass.
-    meta_path = os.path.join(kanban, "demo", "_meta.json")
+    meta_path = os.path.join(kanban, "boards", "demo", "_meta.json")
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump({"project": "Demo", "commitRequirements": "all tests must pass"}, f)
     _complete_setup(kanban, monkeypatch, pid)
@@ -181,7 +181,7 @@ def test_completed_kanban_only_gate_failed_does_not_commit(kanban, monkeypatch):
     t["commitGate"] = {"requirementsMet": False, "summary": "3 tests failing"}
     with open(p, "w", encoding="utf-8") as f:
         json.dump(t, f)
-    meta_path = os.path.join(kanban, "demo", "_meta.json")
+    meta_path = os.path.join(kanban, "boards", "demo", "_meta.json")
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump({"project": "Demo", "commitRequirements": "all tests must pass"}, f)
     _complete_setup(kanban, monkeypatch, pid)

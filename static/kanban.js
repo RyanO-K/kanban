@@ -40,6 +40,14 @@ const MODEL_OPTIONS = [
     if(data && Array.isArray(data.models) && data.models.length){
       MODEL_OPTIONS.length = 1; // keep the "(default)" entry
       data.models.forEach(m=>MODEL_OPTIONS.push({value:m.value, label:m.label}));
+      // Repopulate the Create Task modal's fModel select so it reflects the
+      // live catalog rather than the static HTML fallback (ticket #86).
+      const sel = document.getElementById("fModel");
+      if(sel){
+        const cur = sel.value;
+        sel.innerHTML = MODEL_OPTIONS.map(m=>'<option value="'+m.value+'">'+m.label+'</option>').join("");
+        sel.value = cur; // restore selection if still valid
+      }
     }
   }catch(e){}
 })();
@@ -52,6 +60,23 @@ function getModelName(modelId){
 }
 let currentFile=null, lastMtime=0, pollTimer=null, dragTaskId=null, dragFile=null, dragEl=null;
 let currentTasks=[], selectedTaskKey=null, currentBoardData=null;
+// Ticket #99: board preload cache. Maps board slug → {data, fetchedAt (ms epoch)}.
+// populateBoardCache() fills it after loadFiles() so switching boards is instant.
+const boardCache={};
+const BOARD_CACHE_TTL=30000; // cache valid for 30s
+async function prefetchBoard(slug){
+  if(!slug)return;
+  try{
+    const data=await apiFetch("/api/board/"+encodeURIComponent(slug));
+    boardCache[slug]={data,fetchedAt:Date.now()};
+  }catch(e){}
+}
+function getCachedBoard(slug){
+  const entry=boardCache[slug];
+  if(!entry)return null;
+  if(Date.now()-entry.fetchedAt>BOARD_CACHE_TTL)return null;
+  return entry.data;
+}
 // Ticket #61: while an optimistic drag-drop is reconciling, remember the moved
 // card's key + target column so a poll firing mid-move re-renders it into the
 // target column (not its stale source) and never duplicates or drops it.
@@ -217,21 +242,56 @@ async function loadFiles(){
     const prevFile=currentFile;
     const exists=prevFile&&(prevFile==="__all__"||files.some(f=>f.filename===prevFile));
     currentFile=exists?prevFile:allOpt.value;sel.value=currentFile;updateBoardSettingsBtn();startPolling();
+    // Ticket #99: background-prefetch every board (except __all__) so future switches are instant.
+    files.forEach(f=>{ if(f.filename!==currentFile) prefetchBoard(f.filename); });
   }catch(e){setServerDown(true);}
 }
 
 async function poll(){
   if(!currentFile)return;
+  // Capture the board this request is FOR. If the user switches boards while the
+  // response is in flight, the stale payload must not be rendered or cached under
+  // the new board's key — with the ?since= short-circuit an __all__ payload cached
+  // as a concrete board sticks (its mtime matches, so every later poll returns
+  // {"unchanged": true} and the wrong render is never corrected).
+  const file=currentFile;
   try{
-    const data=await apiFetch("/api/board/"+encodeURIComponent(currentFile));
-    currentBoardData=data;
-    if(data.mtime!==lastMtime){lastMtime=data.mtime;currentTasks=data.tasks||[];renderBoard(data);if(selectedTaskKey)refreshPanel();}
+    const since=lastMtime?"?since="+encodeURIComponent(lastMtime):"";
+    const data=await apiFetch("/api/board/"+encodeURIComponent(file)+since);
+    if(file!==currentFile)return; // board switched mid-flight; drop the stale response
+    if(!data.unchanged){
+      currentBoardData=data;
+      // Ticket #99: keep the cache warm so switching back to this board is instant.
+      boardCache[file]={data,fetchedAt:Date.now()};
+      if(data.mtime!==lastMtime){lastMtime=data.mtime;currentTasks=data.tasks||[];renderBoard(data);if(selectedTaskKey)refreshPanel();}
+    }
     pillState.lastUpdated="Updated "+new Date().toLocaleTimeString();
     setServerDown(false);
     checkOrchStatus();
-  }catch(e){setServerDown(true);}
+  }catch(e){if(file===currentFile)setServerDown(true);}
 }
-function startPolling(){if(pollTimer)clearInterval(pollTimer);lastMtime=0;if(!$("board").querySelector(".column"))showBoardSkeleton();poll();pollTimer=setInterval(poll,POLL_MS);}
+// Ticket #99: startPolling optionally accepts cached board data so we can render
+// instantly on a board switch without waiting for a network round-trip. When
+// cachedData is provided the board paints immediately; poll() is still called to
+// pick up any changes that arrived since the cache was populated.
+function startPolling(cachedData){
+  if(pollTimer)clearInterval(pollTimer);
+  if(cachedData){
+    // Instant render from cache — no skeleton, no wait.
+    lastMtime=cachedData.mtime||0;
+    currentBoardData=cachedData;
+    currentTasks=cachedData.tasks||[];
+    renderBoard(cachedData);
+    if(selectedTaskKey)refreshPanel();
+    // Update the cache entry so it stays fresh for the next switch.
+    boardCache[currentFile]={data:cachedData,fetchedAt:Date.now()};
+  } else {
+    lastMtime=0;
+    if(!$("board").querySelector(".column"))showBoardSkeleton();
+  }
+  poll();
+  pollTimer=setInterval(poll,POLL_MS);
+}
 function showBoardSkeleton(){
   const board=$("board");board.innerHTML="";
   for(let i=0;i<5;i++){
@@ -349,6 +409,10 @@ async function updateTaskModel(file,taskId,model){
   try{await apiFetch("/api/board/"+encodeURIComponent(file)+"/task/"+encodeURIComponent(taskId),{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({model})});lastMtime=0;showToast("Task #"+taskId+" model → "+(model||"default"));}
   catch(e){showToast("Failed to set model for #"+taskId,true);}
 }
+async function updateTaskFields(file,taskId,fields){
+  try{await apiFetch("/api/board/"+encodeURIComponent(file)+"/task/"+encodeURIComponent(taskId),{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(fields)});lastMtime=0;poll();}
+  catch(e){showToast("Failed to save changes",true);throw e;}
+}
 async function deleteTask(file,taskId,title){
   if(!confirm("Delete task #"+taskId+": "+title+"?"))return;
   try{await apiFetch("/api/board/"+encodeURIComponent(file)+"/task/"+encodeURIComponent(taskId),{method:"DELETE"});lastMtime=0;closePanel();showToast("Deleted #"+taskId);poll();}
@@ -383,27 +447,49 @@ function closePanel(){
   $("board").classList.remove("panel-open");
   document.querySelectorAll(".card.selected").forEach(c=>c.classList.remove("selected"));
 }
+// Ticket #101: is the user mid-edit in the side panel? The inline editors mount
+// a <textarea> (description, class sp-detail-edit — startDetailEdit) or an
+// <input> (title, class sp-title-input — startTitleEdit) into the panel. While
+// one is open its value is unsaved DOM-only state, so a poll-driven re-render
+// (body.innerHTML=… in renderPanel) would silently discard whatever was typed.
+function panelHasOpenEdit(){
+  const panel=$("sidePanel");
+  if(!panel)return false;
+  return !!panel.querySelector("textarea.sp-detail-edit, input.sp-title-input");
+}
 function refreshPanel(){
   const t=currentTasks.find(x=>taskKey(x)===selectedTaskKey);
   if(!t){closePanel();return;}
-  // Preserve comment + chat drafts across re-renders
-  const draftMsg=$("spCMsg"),draftWriter=$("spCWriter");
+  // Ticket #101: never tear down the panel out from under an in-progress inline
+  // edit — that wipes the user's unsaved description/title text. Skip this poll's
+  // re-render; the next poll after they save/cancel picks up server changes.
+  if(panelHasOpenEdit())return;
+  // Preserve comment draft, chat draft and branch input across re-renders
+  const draftMsg=$("spCMsg"),draftWriter=$("spCWriter"),draftBranch=$("spBranchInput");
   const chatMsg=$("spChatMsg"),chatWriter=$("spChatWriter");
   const savedMsg=draftMsg?draftMsg.value:"",savedWriter=draftWriter?draftWriter.value:"";
   const savedChat=chatMsg?chatMsg.value:"",savedChatWriter=chatWriter?chatWriter.value:"";
+  const savedBranch=draftBranch?draftBranch.value:null;
   const wasFocused=document.activeElement===draftMsg||document.activeElement===draftWriter||
+                   document.activeElement===draftBranch||
                    document.activeElement===chatMsg||document.activeElement===chatWriter;
   const focusedId=wasFocused?document.activeElement.id:null;
   renderPanel(t);
-  if(savedMsg||savedWriter||savedChat||savedChatWriter){
+  if(savedMsg||savedWriter){
     const newMsg=$("spCMsg"),newWriter=$("spCWriter");
     if(newMsg)newMsg.value=savedMsg;
     if(newWriter)newWriter.value=savedWriter;
+  }
+  if(savedChat||savedChatWriter){
     const newChat=$("spChatMsg"),newChatWriter=$("spChatWriter");
     if(newChat)newChat.value=savedChat;
     if(newChatWriter&&savedChatWriter)newChatWriter.value=savedChatWriter;
-    if(focusedId&&$(focusedId))$(focusedId).focus();
   }
+  if(savedBranch!==null){
+    const newBranch=$("spBranchInput");
+    if(newBranch)newBranch.value=savedBranch;
+  }
+  if(focusedId&&$(focusedId))$(focusedId).focus();
 }
 // ── Live logs poll ──────────────────────────────────────────────────────
 // A single active poll at a time. `logPoll.openKey` remembers which task's log
@@ -677,6 +763,82 @@ async function sendChat(board,taskId){
   btn.disabled=false;area.disabled=false;area.focus();
 }
 
+function startTitleEdit(task,srcFile){
+  const titleEl=$("spTitle");
+  if(titleEl.querySelector("input"))return; // already editing
+  const current=task.title;
+  const inp=document.createElement("input");
+  inp.type="text";inp.value=current;inp.className="sp-title-input";
+  inp.setAttribute("aria-label","Edit ticket title");
+  const save=async()=>{
+    const val=inp.value.trim();
+    if(!val){showToast("Title cannot be empty",true);inp.focus();return;}
+    if(val===current){restore();return;}
+    try{
+      await updateTaskFields(srcFile,String(task.id),{title:val});
+      task.title=val;
+      restore();
+    }catch(e){inp.focus();}
+  };
+  const restore=()=>{titleEl.textContent="#"+task.id+" "+task.title;};
+  titleEl.textContent="";
+  titleEl.appendChild(inp);
+  inp.focus();inp.select();
+  inp.addEventListener("keydown",e=>{
+    if(e.key==="Enter"){e.preventDefault();save();}
+    else if(e.key==="Escape"){restore();}
+  });
+  inp.addEventListener("blur",save);
+}
+
+function startDetailEdit(task,srcFile){
+  const view=$("spDetailView");
+  const field=$("spDetailField");
+  if(!view||!field)return;
+  if(field.querySelector("textarea"))return; // already editing
+  const current=task.detail||"";
+  const ta=document.createElement("textarea");
+  ta.className="form-input form-textarea sp-detail-edit";
+  ta.value=current;ta.rows=5;
+  ta.setAttribute("aria-label","Edit description");
+  const btnRow=document.createElement("div");
+  btnRow.className="sp-detail-edit-actions";
+  const saveBtn=document.createElement("button");saveBtn.type="button";saveBtn.className="btn btn-create";saveBtn.style.fontSize="12px";saveBtn.style.padding="4px 12px";saveBtn.textContent="Save";
+  const cancelBtn=document.createElement("button");cancelBtn.type="button";cancelBtn.className="btn btn-cancel";cancelBtn.style.fontSize="12px";cancelBtn.style.padding="4px 12px";cancelBtn.textContent="Cancel";
+  btnRow.appendChild(saveBtn);btnRow.appendChild(cancelBtn);
+  const restore=()=>{
+    ta.remove();btnRow.remove();
+    view.style.display="";
+    const editBtn=field.querySelector(".sp-edit-detail-btn");
+    if(editBtn)editBtn.style.display="";
+  };
+  const save=async()=>{
+    const val=ta.value.trim();
+    if(val===current){restore();return;}
+    saveBtn.disabled=true;cancelBtn.disabled=true;
+    try{
+      await updateTaskFields(srcFile,String(task.id),{detail:val});
+      task.detail=val||undefined;
+      // Update the view text in place
+      if(val){view.textContent=val;view.className="sp-detail";view.style.cssText="";}
+      else{view.textContent="No description";view.className="sp-detail sp-detail-empty";view.style.color="var(--text-muted)";view.style.fontStyle="italic";}
+      restore();
+    }catch(e){saveBtn.disabled=false;cancelBtn.disabled=false;}
+  };
+  view.style.display="none";
+  const editBtn=field.querySelector(".sp-edit-detail-btn");
+  if(editBtn)editBtn.style.display="none";
+  view.parentNode.insertBefore(ta,view.nextSibling);
+  view.parentNode.insertBefore(btnRow,ta.nextSibling);
+  ta.focus();
+  saveBtn.addEventListener("click",save);
+  cancelBtn.addEventListener("click",restore);
+  ta.addEventListener("keydown",e=>{
+    if(e.key==="Escape"){restore();}
+    if(e.key==="Enter"&&(e.ctrlKey||e.metaKey)){save();}
+  });
+}
+
 function renderPanel(task){
   stopLogPoll(); // clear any prior poll; bindLogToggle re-arms it if still open
   stopChatPoll(); // chat section below re-arms it when the agent is live
@@ -695,13 +857,35 @@ function renderPanel(task){
   if(task.createdAt) html+='<div class="sp-field"><div class="sp-field-label">Created</div><div class="sp-field-value">'+esc(new Date(task.createdAt).toLocaleString())+'</div></div>';
   if(task._filePath) html+='<div class="sp-field"><div class="sp-field-label">File Path</div><div class="sp-field-value sp-session-row"><button type="button" class="sp-copy-btn" id="spCopyPath" title="Copy ticket file path to clipboard">📋 Copy path</button></div></div>';
   if(task.claudeSessionId) html+='<div class="sp-field"><div class="sp-field-label">Claude Session</div><div class="sp-field-value sp-session-row"><code class="sp-session-id">'+esc(task.claudeSessionId)+'</code><button type="button" class="sp-copy-btn" id="spCopySession" title="Copy resume command">Copy resume cmd</button></div></div>';
-  if(task.detail) html+='<div class="sp-field"><div class="sp-field-label">Description</div><div class="sp-detail">'+esc(task.detail)+'</div></div>';
+  html+='<div class="sp-field" id="spDetailField"><div class="sp-field-label">Description <button type="button" class="sp-copy-btn sp-edit-detail-btn" id="spEditDetailBtn" title="Edit description" style="padding:2px 6px;margin-left:4px;">&#x270E;</button></div>'+(task.detail?'<div class="sp-detail" id="spDetailView">'+esc(task.detail)+'</div>':'<div class="sp-detail sp-detail-empty" id="spDetailView" style="color:var(--text-muted);font-style:italic;">No description</div>')+'</div>';
+
+  // Merge branch field — only when the board has showMergeBranch enabled.
+  const showMergeBranch=!!(currentBoardData&&currentBoardData.showMergeBranch);
+  if(showMergeBranch){
+    const isDone=task._column==="done";
+    const hasBranch=!!(task.mergeBranch&&task.mergeBranch.trim());
+    if(isDone&&hasBranch){
+      html+='<div class="sp-merge-banner">&#x26A1; Merge into <strong>'+esc(task.mergeBranch)+'</strong></div>';
+    }
+    html+='<div class="sp-field"><div class="sp-field-label">Branch</div>'
+      +'<input type="text" class="form-input sp-branch-input" id="spBranchInput" value="'+esc(task.mergeBranch||'')+'" placeholder="e.g. main, release-v2" style="font-size:12px;padding:4px 8px;"></div>';
+  }
 
   const deps=task.dependsOn?(Array.isArray(task.dependsOn)?task.dependsOn:[task.dependsOn]):[];
   if(deps.length||task.optional){
     html+='<div class="sp-field"><div class="sp-field-label">Tags</div><div class="sp-tags">';
     deps.forEach(d=>{html+='<span class="sp-tag dep">↳ needs #'+d+'</span>';});
     if(task.optional) html+='<span class="sp-tag opt">⚑ optional</span>';
+    html+='</div></div>';
+  }
+  const files=Array.isArray(task.files)?task.files:[];
+  if(files.length){
+    html+='<div class="sp-field"><div class="sp-field-label">Files</div><div class="sp-file-list">';
+    files.forEach(f=>{
+      const norm=String(f).replace(/\\/g,"/");
+      const href="vscode://file/"+norm.replace(/^\/+/,"");
+      html+='<a class="sp-file-link" href="#" data-vscode-href="'+esc(href)+'" title="'+esc(norm)+'">'+esc(norm.split("/").pop())+'</a>';
+    });
     html+='</div></div>';
   }
   html+='</div>';
@@ -838,6 +1022,44 @@ function renderPanel(task){
       pollChat(srcFile,String(task.id));
     }
   }
+
+  // File links: use window.open so vscode:// protocol navigates correctly
+  // inside VS Code's Simple Browser (direct <a href> navigation is blocked)
+  body.querySelectorAll(".sp-file-link").forEach(a=>{
+    a.addEventListener("click",e=>{
+      e.preventDefault();
+      const href=a.dataset.vscodeHref;
+      if(href) window.open(href,"_self");
+    });
+  });
+
+  // Title edit button
+  const titleEditBtn=$("spTitleEditBtn");
+  if(titleEditBtn) titleEditBtn.addEventListener("click",()=>startTitleEdit(task,srcFile));
+
+  // Branch input: save on blur or Enter
+  const branchInput=$("spBranchInput");
+  if(branchInput){
+    let branchSaved=branchInput.value;
+    const saveBranch=async()=>{
+      const val=branchInput.value.trim();
+      if(val===branchSaved)return;
+      try{
+        await updateTaskFields(srcFile,String(task.id),{mergeBranch:val});
+        task.mergeBranch=val||undefined;
+        branchSaved=val;
+      }catch(e){}
+    };
+    branchInput.addEventListener("blur",saveBranch);
+    branchInput.addEventListener("keydown",e=>{
+      if(e.key==="Enter"){e.preventDefault();branchInput.blur();}
+      else if(e.key==="Escape"){branchInput.value=branchSaved;branchInput.blur();}
+    });
+  }
+
+  // Description inline edit
+  const editDetailBtn=$("spEditDetailBtn");
+  if(editDetailBtn) editDetailBtn.addEventListener("click",()=>startDetailEdit(task,srcFile));
 
   // Spec rows: toggle inline preview; fetch + render markdown on first open.
   // The "Open ↗" link is a normal anchor (new tab) — stop it bubbling so the
@@ -1041,6 +1263,32 @@ function animateExit(card){
   setTimeout(done,400); // safety net
 }
 
+// "Clear done": hide every done ticket via POST /api/board/<slug>/clear-done.
+// Files stay on disk (server stamps cleared:true and board payloads skip
+// cleared+done tickets). In the __all__ view the Done column mixes boards, so
+// clear each board that contributed a done ticket.
+async function clearDoneTickets(){
+  const done=currentTasks.filter(t=>t._column==="done");
+  if(!done.length){showToast("No done tickets to clear");return;}
+  const boards=[...new Set(done.map(t=>t._board||currentFile))].filter(b=>b&&b!=="__all__");
+  if(!boards.length)return;
+  const msg="Clear "+done.length+" done ticket"+(done.length===1?"":"s")
+    +(boards.length>1?" across "+boards.length+" boards":"")
+    +"? They stay on disk and just stop showing up.";
+  if(!confirm(msg))return;
+  let n=0;
+  try{
+    for(const b of boards){
+      const r=await apiFetch("/api/board/"+encodeURIComponent(b)+"/clear-done",{method:"POST"});
+      n+=r.cleared||0;
+    }
+    showToast("Cleared "+n+" done ticket"+(n===1?"":"s"));
+  }catch(e){
+    showToast("Failed to clear done tickets",true);
+  }
+  lastMtime=0;poll();
+}
+
 function renderBoard(data){
   const board=$("board");
   // Ticket #65: clear skeleton/placeholder nodes before keyed reconciliation runs.
@@ -1107,6 +1355,20 @@ function renderBoard(data){
       if(colEl._color!==col.color){colEl._color=col.color;colEl.style.setProperty("--col-color",col.color);}
       if(colEl._label!==col.label){colEl._label=col.label;hdr.innerHTML=col.label+' <span class="col-count">'+tasks.length+"</span>";}
       else{const b=colEl.querySelector(".col-count");const n=String(tasks.length);if(b.textContent!==n){b.textContent=n;popBadge(b);}}
+    }
+    // Done column: a persistent Clear button in the header (re-appended if a
+    // label-change rewrite of the header HTML ever drops it), shown only when
+    // there is something to clear.
+    if(col.key==="done"){
+      let cb=hdr.querySelector(".col-clear-btn");
+      if(!cb){
+        cb=document.createElement("button");
+        cb.type="button";cb.className="col-clear-btn";cb.textContent="Clear";
+        cb.title="Hide all done tickets — the ticket files are kept on disk";
+        cb.addEventListener("click",clearDoneTickets);
+        hdr.appendChild(cb);
+      }
+      cb.style.display=tasks.length?"":"none";
     }
     liveCols[col.key]=colEl;
     // Place the column at its data-defined position (reuses the node when already there).
@@ -1392,7 +1654,28 @@ $("taskForm").addEventListener("submit",async e=>{
 });
 
 // ── Init ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-$("boardSelect").addEventListener("change",e=>{currentFile=e.target.value;currentBoardData=null;closePanel();updateBoardSettingsBtn();if(currentFile)startPolling();});
+$("boardSelect").addEventListener("change",e=>{
+  currentFile=e.target.value;currentBoardData=null;closePanel();updateBoardSettingsBtn();
+  if(currentFile){
+    // Ticket #99: use cached board data for an instant render; fall back to the
+    // normal skeleton+fetch path when the cache is empty or stale.
+    startPolling(getCachedBoard(currentFile));
+  }
+});
+// Ticket #99: prefetch a board when the user hovers over its option in the select,
+// giving a head-start on the fetch before they release the click.
+(function bindSelectPrefetch(){
+  const sel=$("boardSelect");
+  let _lastHovered=null;
+  sel.addEventListener("mouseover",e=>{
+    const opt=e.target.closest("option");
+    if(!opt||opt.value===_lastHovered||!opt.value||opt.value==="__all__")return;
+    _lastHovered=opt.value;
+    if(!getCachedBoard(opt.value)) prefetchBoard(opt.value);
+  });
+  // Also handle keyboard navigation inside the select (change fires on commit, so
+  // we watch mouseover which covers hover; this is a best-effort enhancement).
+})();
 
 // ── Board Settings modal ──────────────────────────────────────────────────────────────────────────────────────────────────────
 // The "__all__" virtual board has no real _meta.json, so settings only apply
@@ -1442,12 +1725,23 @@ function openBoardModal(){
   $("bCommitReq").value=d.commitRequirements||"";
   $("bUseWorktrees").checked=d.useWorktrees===true;
   $("bUseDocker").checked=d.useDocker===true;
+  $("bContainerSettings").style.display=d.useDocker===true?"":"none";
+  $("bShowMergeBranch").checked=d.showMergeBranch===true;
   $("bEnvVars").value=envMapToText(d.envVars);
   $("bPassthroughEnv").value=namesToText(d.passthroughEnv);
+  $("bLayrrPort").value=(d.layrr&&d.layrr.targetPort)||"";
+  $("bLayrrRoot").value=(d.layrr&&d.layrr.projectRoot)||"";
+  $("bLayrrBranch").value=(d.layrr&&d.layrr.baseBranch)||"";
+  // Rebuild from the live catalog on every open (MODEL_OPTIONS loads async).
+  $("bLayrrModel").innerHTML=MODEL_OPTIONS.map(m=>'<option value="'+m.value+'">'+m.label+'</option>').join("");
+  $("bLayrrModel").value=(d.layrr&&d.layrr.model)||"";
+  $("bLayrrStatus").textContent="";
+  renderLayrrModalInstances();
   $("boardModal").classList.add("open");
   setTimeout(()=>$("bProject").focus(),50);
 }
 function closeBoardModal(){$("boardModal").classList.remove("open");}
+$("bUseDocker").addEventListener("change",()=>{$("bContainerSettings").style.display=$("bUseDocker").checked?"":"none";});
 $("boardSettingsBtn").addEventListener("click",openBoardModal);
 $("boardModalClose").addEventListener("click",closeBoardModal);
 $("boardCancelBtn").addEventListener("click",closeBoardModal);
@@ -1455,12 +1749,137 @@ $("boardModal").addEventListener("click",e=>{if(e.target===$("boardModal"))close
 $("boardForm").addEventListener("submit",async e=>{
   e.preventDefault();
   if(!currentFile||currentFile==="__all__")return;
-  const payload={project:$("bProject").value.trim(),directory:$("bDirectory").value.trim(),description:$("bDescription").value.trim(),commitRequirements:$("bCommitReq").value.trim(),useWorktrees:$("bUseWorktrees").checked,useDocker:$("bUseDocker").checked,envVars:envTextToMap($("bEnvVars").value),passthroughEnv:textToNames($("bPassthroughEnv").value)};
+  const payload={project:$("bProject").value.trim(),directory:$("bDirectory").value.trim(),description:$("bDescription").value.trim(),commitRequirements:$("bCommitReq").value.trim(),useWorktrees:$("bUseWorktrees").checked,useDocker:$("bUseDocker").checked,envVars:envTextToMap($("bEnvVars").value),passthroughEnv:textToNames($("bPassthroughEnv").value),layrr:layrrCfgFromForm(),showMergeBranch:$("bShowMergeBranch").checked};
   try{
     await apiFetch("/api/board/"+encodeURIComponent(currentFile)+"/meta",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
     showToast("Project settings saved");closeBoardModal();lastMtime=0;loadFiles();poll();
   }catch(err){showToast("Failed to save project settings",true);}
 });
+
+// ── Layrr live edit ─────────────────────────────────────────────
+// Board-level: the Project Settings modal saves a `layrr` block ({targetPort,
+// projectRoot, baseBranch}) and Go live asks the server to put the layrr
+// point-and-click overlay in front of the dev server ALREADY listening on that
+// port. Several overlays may be live at once (across boards/ports); each gets
+// a topbar chip next to the status pill linking to its proxy url.
+let layrrInstances=[];
+
+// apiFetch discards the response body on non-2xx, but layrr errors carry the
+// actionable text ("nothing is listening on port 5273 …") — surface it.
+async function layrrApi(url,opts){
+  opts=opts||{};
+  if(window.KANBAN_TOKEN){opts.headers=Object.assign({"X-Kanban-Token":window.KANBAN_TOKEN},opts.headers||{});}
+  const r=await fetch(url,opts);
+  let body=null;try{body=await r.json();}catch(e){}
+  if(!r.ok)throw new Error((body&&body.error)||("HTTP "+r.status));
+  return body;
+}
+
+function layrrCfgFromForm(){
+  const cfg={};
+  const port=parseInt($("bLayrrPort").value,10);
+  if(port>0)cfg.targetPort=port;
+  const root=$("bLayrrRoot").value.trim();if(root)cfg.projectRoot=root;
+  const br=$("bLayrrBranch").value.trim();if(br)cfg.baseBranch=br;
+  const model=$("bLayrrModel").value.trim();if(model)cfg.model=model;
+  return cfg;
+}
+
+async function refreshLayrr(){
+  try{
+    const d=await layrrApi("/api/layrr/status");
+    layrrInstances=d.instances||[];
+  }catch(e){layrrInstances=[];}
+  renderLayrrChips();
+  renderLayrrModalInstances();
+}
+
+function renderLayrrChips(){
+  const wrap=$("layrrChips");if(!wrap)return;
+  const html=layrrInstances.map(i=>{
+    const state=i.state==="running"?"running":i.state==="failed"?"failed":"starting";
+    const title=i.state==="failed"?(i.lastError||"layrr failed"):(i.board+" — "+i.state+"\n"+i.url);
+    return '<span class="layrr-chip '+state+'" title="'+esc(title)+'">'
+      +'<a href="'+esc(i.url)+'" target="_blank" rel="noopener">&#x26A1; '+esc(i.board)+' :'+esc(i.proxyPort)+'</a>'
+      +'<button type="button" data-layrr-stop="'+esc(i.id)+'" title="Stop this layrr overlay">&times;</button></span>';
+  }).join("");
+  // Re-render only on change so an open native link context menu isn't yanked away.
+  if(wrap._html!==html){wrap._html=html;wrap.innerHTML=html;}
+}
+
+function renderLayrrModalInstances(){
+  const wrap=$("bLayrrInstances");if(!wrap)return;
+  if(!$("boardModal").classList.contains("open"))return;
+  const mine=layrrInstances.filter(i=>i.board===currentFile);
+  wrap.innerHTML=mine.map(i=>
+    '<div class="layrr-inst">'
+    +'<span class="layrr-dot '+esc(i.state)+'"></span>'
+    +'<a href="'+esc(i.url)+'" target="_blank" rel="noopener">'+esc(i.url)+'</a>'
+    +'<span style="color:var(--text-muted);">dev :'+esc(i.targetPort)+' — '+esc(i.state)+'</span>'
+    +'<button type="button" class="btn btn-cancel" style="padding:2px 10px;font-size:11px;" data-layrr-stop="'+esc(i.id)+'">Stop</button>'
+    +'</div>').join("");
+}
+
+async function stopLayrr(id){
+  try{await layrrApi("/api/layrr/stop/"+encodeURIComponent(id),{method:"POST"});showToast("Layrr overlay stopped");}
+  catch(e){showToast("Failed to stop layrr: "+e.message,true);}
+  refreshLayrr();
+}
+document.addEventListener("click",e=>{
+  const b=e.target.closest("[data-layrr-stop]");
+  if(b){e.preventDefault();stopLayrr(b.getAttribute("data-layrr-stop"));}
+});
+
+// Poll /api/layrr/status every second until the instance answers, dies, or
+// *seconds* elapse. Returns the running instance, or null on timeout.
+async function waitForLayrr(id,seconds){
+  for(let n=0;n<seconds;n++){
+    await new Promise(r=>setTimeout(r,1000));
+    try{
+      const d=await layrrApi("/api/layrr/status");
+      layrrInstances=d.instances||[];
+    }catch(e){continue;}
+    renderLayrrChips();renderLayrrModalInstances();
+    const inst=layrrInstances.find(i=>i.id===id);
+    if(!inst)throw new Error("layrr exited during startup — see _orchestrator/layrr-logs/");
+    if(inst.state==="running")return inst;
+    if(inst.state==="failed")throw new Error(inst.lastError||"layrr failed to start");
+  }
+  return null;
+}
+
+$("bLayrrGoLive").addEventListener("click",async()=>{
+  if(!currentFile||currentFile==="__all__"){showToast("Select a specific board first",true);return;}
+  const st=$("bLayrrStatus"),btn=$("bLayrrGoLive");
+  btn.disabled=true;
+  try{
+    st.textContent="Saving settings…";
+    await apiFetch("/api/board/"+encodeURIComponent(currentFile)+"/meta",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({layrr:layrrCfgFromForm()})});
+    st.textContent="Starting layrr proxy…";
+    const r=await layrrApi("/api/layrr/start/"+encodeURIComponent(currentFile),{method:"POST"});
+    const inst=r.instance;
+    if(r.alreadyRunning){
+      st.innerHTML='Already live: <a href="'+esc(inst.url)+'" target="_blank" rel="noopener">'+esc(inst.url)+'</a>';
+      window.open(inst.url,"_blank");refreshLayrr();return;
+    }
+    st.textContent="Waiting for the overlay on "+inst.url+"…";
+    const up=await waitForLayrr(inst.id,60);
+    if(up){
+      st.innerHTML='Live: <a href="'+esc(up.url)+'" target="_blank" rel="noopener">'+esc(up.url)+'</a>';
+      // May be swallowed by a popup blocker (we're past the click gesture);
+      // the inline link and the topbar chip carry the same url either way.
+      window.open(up.url,"_blank");
+    }else{
+      st.textContent="Proxy still not answering after 60s — check _orchestrator/layrr-logs/.";
+    }
+  }catch(err){
+    st.textContent=err.message||"failed";
+    showToast("Go live failed",true);
+  }finally{btn.disabled=false;refreshLayrr();}
+});
+
+refreshLayrr();
+setInterval(refreshLayrr,5000);
 
 updateBoardSettingsBtn();
 loadFiles();
@@ -1491,9 +1910,10 @@ document.querySelectorAll(".view-tab").forEach(b=>b.addEventListener("click",()=
 async function renderProfiles(){
   const wrap = $("view-profiles");
   wrap.innerHTML = "<div style='color:#64748b'>Loading…</div>";
-  let profiles=[], state={};
+  let profiles=[], state={}, serverCfg={};
   try{ profiles = (await apiFetch("/api/profiles")).profiles||[]; }catch(e){}
   try{ state = await apiFetch("/api/orchestrator/state"); }catch(e){}
+  try{ serverCfg = await apiFetch("/api/server/config"); }catch(e){}
   let html = '<p class="setup-section">Concurrency</p>';
   html += '<div class="setup-grid">';
   html += '<div class="setup-field"><label>Max agents in flight</label>'
@@ -1512,6 +1932,20 @@ async function renderProfiles(){
         + '<input type="number" id="triageTimeoutSecondsInput" min="30" max="600" value="'+(state.triageTimeoutSeconds??120)+'">'
         + '<button class="add-btn" id="triageTimeoutSecondsSave">Save</button></div>';
   html += '</div>';
+  html += '<hr class="setup-divider">';
+  html += '<p class="setup-section">Server CPU cap</p>';
+  html += '<div style="color:var(--text-muted);font-size:11px;margin-bottom:10px;max-width:520px;">'
+        + 'Kernel hard cap on the server process (percent of total system CPU across all cores). '
+        + '0 disables the cap. Applies live — no restart needed. Dispatched agents run uncapped.</div>';
+  html += '<div class="setup-grid">';
+  html += '<div class="setup-field"><label>CPU limit (%)</label>'
+        + '<input type="number" id="cpuLimitInput" min="0" max="100" value="'+(serverCfg.cpuLimitPercent??serverCfg.effectivePercent??5)+'">'
+        + '<button class="add-btn" id="cpuLimitSave">Save</button></div>';
+  html += '</div>';
+  if(serverCfg.envOverride){
+    html += '<div style="color:var(--warn,#f59e0b);font-size:11px;margin:-8px 0 12px;max-width:520px;">'
+          + 'KANBAN_CPU_LIMIT is set in the environment and overrides this value — your edit is saved but the env var wins until it is unset.</div>';
+  }
   html += '<hr class="setup-divider">';
   html += '<p class="setup-section">Loop models</p>';
   html += '<div style="color:var(--text-muted);font-size:11px;margin-bottom:10px;max-width:520px;">'
@@ -1557,6 +1991,12 @@ async function renderProfiles(){
       body:JSON.stringify({triageTimeoutSeconds:parseInt($("triageTimeoutSecondsInput").value,10)||120})});
     showToast("LLM timeout saved");}
     catch(e){showToast("Failed to save LLM timeout",true);}
+  });
+  $("cpuLimitSave").addEventListener("click", async ()=>{
+    try{const r=await apiFetch("/api/server/config",{method:"PUT",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({cpuLimitPercent:parseInt($("cpuLimitInput").value,10)||0})});
+    showToast(r.applied?("CPU cap set to "+r.effectivePercent+"%"):"CPU cap saved (applies on restart)");}
+    catch(e){showToast("Failed to save CPU cap",true);}
   });
   $("triageModelSave").addEventListener("click", async ()=>{
     try{await apiFetch("/api/orchestrator/state",{method:"PUT",headers:{"Content-Type":"application/json"},
@@ -1750,8 +2190,6 @@ async function renderOrchestrator(){
   const inFlight = (all.tasks||[]).filter(t=>t.orchestrator&&t.orchestrator.state==="dispatched");
   html += '<h2 style="font-size:16px;margin:18px 0 10px;">In flight ('+inFlight.length+')</h2><div id="inflight"></div>';
 
-  // Activity feed.
-  html += '<h2 style="font-size:16px;margin:18px 0 10px;">Activity</h2><div id="feed"></div>';
   wrap.innerHTML = html;
 
   $("orchToggle").addEventListener("change", async (ev)=>{
@@ -1814,17 +2252,32 @@ async function renderOrchestrator(){
   });
 
   const feed=$("feed");
-  (activity.entries||[]).slice().reverse().slice(0,80).forEach(e=>{
-    const row=document.createElement("div");
-    row.style.cssText="font-size:12px;color:var(--text-muted);padding:4px 0;border-bottom:1px solid var(--surface-alt);";
-    row.textContent="["+(e.kind||"")+"] #"+(e.ticket||"")+" "+(e.reason||e.message||"")+"  "+(e.ts||"");
-    feed.appendChild(row);
-  });
+  if(feed){
+    feed.innerHTML="";
+    (activity.entries||[]).slice().reverse().slice(0,80).forEach(e=>{
+      const row=document.createElement("div");
+      row.style.cssText="font-size:12px;color:var(--text-muted);padding:4px 0;border-bottom:1px solid var(--surface-alt);";
+      row.textContent="["+(e.kind||"")+"] #"+(e.ticket||"")+" "+(e.reason||e.message||"")+"  "+(e.ts||"");
+      feed.appendChild(row);
+    });
+    if(!feed.children.length) feed.innerHTML='<div style="color:var(--text-muted);font-size:12px;">No activity yet.</div>';
+  }
+
+  const actDet=$("activityDetails");
+  const actChev=$("activityChevron");
+  if(actDet && actChev){
+    actChev.style.transform=actDet.open?"rotate(90deg)":"";
+    if(!actDet._chevronWired){
+      actDet._chevronWired=true;
+      actDet.addEventListener("toggle",()=>{ actChev.style.transform=actDet.open?"rotate(90deg)":""; });
+    }
+  }
 }
 
 function questionCard(t){
   const q=t.orchestrator.question;
   const card=document.createElement("div");
+  card.dataset.qkey=t._board+":"+t.id;
   card.style.cssText="background:var(--surface);border-left:3px solid #ef4444;border-radius:6px;padding:12px;margin-bottom:10px;";
   card.innerHTML='<div style="font-weight:600;">#'+esc(t.id)+' '+esc(t.title)+'</div>'
     +'<div style="margin:6px 0;color:var(--text-muted);font-size:13px;">'+esc(q.prompt)+'</div>';
@@ -1877,7 +2330,54 @@ async function refreshAttention(){
   catch(e){ return; }  // server down — keep last-known count; the status pill shows offline
   attentionTasks=(all.tasks||[]).filter(t=>t.orchestrator&&t.orchestrator.question&&!t.orchestrator.question.answer);
   updateBell();
-  if($("bellModal").classList.contains("open")) renderBellInbox();
+  // Only rebuild the open modal when the question set actually changed — an
+  // unconditional rebuild every poll tick wiped the user's half-typed answer.
+  if($("bellModal").classList.contains("open") && attentionSig()!==_bellRenderedSig) renderBellInbox();
+}
+
+// Identity of the rendered question set: which tickets are asking, and what.
+// Anything not captured here (e.g. ticket title) won't trigger a live rebuild.
+function attentionSig(){
+  return attentionTasks.map(t=>{
+    const q=t.orchestrator.question;
+    return JSON.stringify([t._board,t.id,q.type,q.multi?1:0,q.prompt,q.options||[]]);
+  }).join("\n");
+}
+let _bellRenderedSig=null;
+
+// Draft answers survive a rebuild: capture per-card input/notes/choices (+focus
+// and caret) keyed by board:id, and put them back on the recreated cards.
+function saveBellDrafts(inbox){
+  const drafts={};
+  inbox.querySelectorAll("[data-qkey]").forEach(card=>{
+    const s={checked:[...card.querySelectorAll("input:checked")].map(i=>i.value)};
+    const inp=card.querySelector("input.form-input"); if(inp) s.value=inp.value;
+    const notes=card.querySelector("textarea"); if(notes) s.notes=notes.value;
+    const ae=document.activeElement;
+    if(card.contains(ae)&&(ae===inp||ae===notes)){
+      s.focus=(ae===notes)?"notes":"input";
+      if(typeof ae.selectionStart==="number"){ s.selStart=ae.selectionStart; s.selEnd=ae.selectionEnd; }
+    }
+    drafts[card.dataset.qkey]=s;
+  });
+  return drafts;
+}
+function restoreBellDrafts(inbox,drafts){
+  inbox.querySelectorAll("[data-qkey]").forEach(card=>{
+    const s=drafts[card.dataset.qkey]; if(!s) return;
+    (s.checked||[]).forEach(v=>{
+      const opt=[...card.querySelectorAll('input[type=radio],input[type=checkbox]')].find(i=>i.value===v);
+      if(opt) opt.checked=true;
+    });
+    const inp=card.querySelector("input.form-input"); if(inp&&s.value!==undefined) inp.value=s.value;
+    const notes=card.querySelector("textarea"); if(notes&&s.notes!==undefined) notes.value=s.notes;
+    const target=s.focus==="notes"?notes:(s.focus==="input"?inp:null);
+    if(target){
+      target.focus();
+      // number inputs throw on setSelectionRange
+      if(typeof s.selStart==="number") try{ target.setSelectionRange(s.selStart,s.selEnd); }catch(e){}
+    }
+  });
 }
 
 function updateBell(){
@@ -1900,12 +2400,15 @@ function updateBell(){
 function renderBellInbox(){
   const inbox=$("bellInbox");
   if(!inbox) return;
+  const drafts=saveBellDrafts(inbox);
   inbox.innerHTML="";
+  _bellRenderedSig=attentionSig();
   if(!attentionTasks.length){
     inbox.innerHTML='<div style="color:var(--text-muted);font-size:13px;text-align:center;padding:28px 12px;">&#x2713; All caught up — nothing needs your input.</div>';
     return;
   }
   attentionTasks.forEach(t=>inbox.appendChild(questionCard(t)));
+  restoreBellDrafts(inbox,drafts);
 }
 
 function openBellModal(){ renderBellInbox(); $("bellModal").classList.add("open"); }

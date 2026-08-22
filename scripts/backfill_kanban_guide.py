@@ -9,18 +9,30 @@ is never overwritten, so re-running never causes drift). New tickets created via
 the server get the field automatically; this script is only for ones that predate
 that change or were created by hand.
 
-Run from anywhere:  python .kanban/backfill_kanban_guide.py
+Run from anywhere:  python .kanban/scripts/backfill_kanban_guide.py
 """
 
 import json
 import os
+import sys
 
-from kanban_server import KANBAN_DIR, KANBAN_GUIDE, META_FILE
+# The app modules live in .kanban/app/, a sibling of this scripts/ dir.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app"))
+
+from kanban_server import KANBAN_DIR, KANBAN_GUIDE, META_FILE, boards_root  # noqa: E402
 
 
 def iter_ticket_files(kanban_dir):
-    """Yield every ticket file path across all boards (dirs with a _meta.json)."""
-    for entry in os.scandir(kanban_dir):
+    """Yield every ticket file path across all boards (dirs with a _meta.json).
+
+    Boards live under the dedicated `boards/` folder (ticket #94), so scan there.
+    A missing folder just means no boards.
+    """
+    try:
+        entries = os.scandir(boards_root())
+    except FileNotFoundError:
+        return
+    for entry in entries:
         if not entry.is_dir():
             continue
         if not os.path.isfile(os.path.join(entry.path, META_FILE)):

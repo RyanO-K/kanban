@@ -133,3 +133,181 @@ def test_get_api_models(server):
     assert r.status == 200
     assert "models" in body
     assert isinstance(body["models"], list)
+
+
+# --- Ticket #86: HTML fModel select must not have hardcoded claude options ---
+
+import os
+import re
+
+
+def _read_kanban_html():
+    """Read kanban.html from the path the server actually serves."""
+    return open(ks.HTML_PATH, encoding="utf-8").read()
+
+
+def _read_kanban_js():
+    """Read kanban.js from the path the server actually serves."""
+    return open(ks.JS_PATH, encoding="utf-8").read()
+
+
+def test_fmodel_select_has_no_hardcoded_claude_options():
+    """kanban.html's fModel <select> must contain only the (default) option.
+
+    Model options are populated at runtime by loadModelOptions() in kanban.js
+    so the picklist reflects the live Anthropic catalog, not a hand-maintained
+    static list. Any hardcoded claude-* <option> inside fModel is a regression.
+    """
+    html = _read_kanban_html()
+    # Extract the fModel select block
+    m = re.search(
+        r'id=["\']fModel["\'][^>]*>(.*?)</select>',
+        html,
+        re.IGNORECASE | re.DOTALL,
+    )
+    assert m, "fModel select not found in kanban.html"
+    inner = m.group(1)
+    # There must be no hardcoded claude-* option values inside fModel
+    assert not re.search(r'value=["\']claude-', inner, re.IGNORECASE), (
+        "fModel select has hardcoded claude-* options; "
+        "these must be populated dynamically by loadModelOptions() in kanban.js"
+    )
+
+
+def test_load_model_options_populates_fmodel_select():
+    """kanban.js's loadModelOptions must update the fModel select element.
+
+    After fetching /api/models, the JS must repopulate both the in-memory
+    MODEL_OPTIONS array and the fModel select DOM element so the Create Task
+    modal reflects the live model catalog.
+    """
+    js = _read_kanban_js()
+    # The loadModelOptions IIFE must reference the fModel element
+    load_fn_match = re.search(
+        r'async function loadModelOptions\(\).*?}\s*\)\(\)',
+        js,
+        re.DOTALL,
+    )
+    assert load_fn_match, "loadModelOptions function not found in kanban.js"
+    fn_body = load_fn_match.group(0)
+    assert "fModel" in fn_body, (
+        "loadModelOptions() does not populate the fModel select element; "
+        "add DOM update logic to keep the Create Task modal in sync"
+    )
+
+
+# --- Ticket #100: prevent moving to ready without a real model ---
+
+
+def test_update_status_ready_requires_real_model(board, monkeypatch):
+    """Moving to 'ready' must fail if the model field is empty (displays as '(default)').
+
+    Ticket #100: prevent confusion where tickets without explicit models get stuck
+    in an ambiguous "(default)" state. The ready column should only contain tickets
+    that can actually dispatch with a defined model.
+    """
+    import os
+    monkeypatch.setattr(ks, "KANBAN_DIR", board)
+    # Modify the existing demo ticket 1 to have no model
+    p = os.path.join(board, "boards", "demo", "1.json")
+    with open(p, "r", encoding="utf-8") as f:
+        task = json.load(f)
+    task.pop("model", None)
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(task, f)
+
+    # Try to move it to ready — should fail
+    result, status = ks.update_task_status("demo", "1", "ready")
+    assert status == 400
+    assert "model" in result.get("error", "").lower()
+
+
+def test_update_status_ready_succeeds_with_real_model(board, monkeypatch):
+    """Moving to 'ready' succeeds if the model field is set to a real model."""
+    import os
+    monkeypatch.setattr(ks, "KANBAN_DIR", board)
+    # Set the existing demo ticket 1 to have a real model
+    p = os.path.join(board, "boards", "demo", "1.json")
+    with open(p, "r", encoding="utf-8") as f:
+        task = json.load(f)
+    task["model"] = "claude-opus-4-8"
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(task, f)
+
+    # Move it to ready — should succeed
+    result, status = ks.update_task_status("demo", "1", "ready")
+    assert status == 200
+    assert result["newStatus"] == "ready"
+
+
+def test_update_status_ready_with_whitespace_only_model_fails(board, monkeypatch):
+    """Moving to 'ready' fails if the model field contains only whitespace."""
+    import os
+    monkeypatch.setattr(ks, "KANBAN_DIR", board)
+    # Set the existing demo ticket 1 to have only whitespace for model
+    p = os.path.join(board, "boards", "demo", "1.json")
+    with open(p, "r", encoding="utf-8") as f:
+        task = json.load(f)
+    task["model"] = "   "
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(task, f)
+
+    # Try to move it to ready — should fail
+    result, status = ks.update_task_status("demo", "1", "ready")
+    assert status == 400
+    assert "model" in result.get("error", "").lower()
+
+
+def test_moving_to_other_columns_ignores_model(board, monkeypatch):
+    """Moving to columns other than 'ready' should succeed regardless of model."""
+    import os
+    monkeypatch.setattr(ks, "KANBAN_DIR", board)
+    # Set the existing demo ticket 1 to have no model
+    p = os.path.join(board, "boards", "demo", "1.json")
+    with open(p, "r", encoding="utf-8") as f:
+        task = json.load(f)
+    task.pop("model", None)
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(task, f)
+
+    # Move to todo — should succeed (model check only for ready)
+    result, status = ks.update_task_status("demo", "1", "todo")
+    assert status == 200
+
+    # Move to blocked — should succeed (model check only for ready)
+    result, status = ks.update_task_status("demo", "1", "blocked")
+    assert status == 200
+
+    # Move to done — should succeed (model check only for ready)
+    result, status = ks.update_task_status("demo", "1", "done")
+    assert status == 200
+
+
+# --- Ticket #107: Add Fable to default models ---
+
+
+def test_fable_5_in_default_models():
+    """claude-fable-5 must be in DEFAULT_MODELS so it is always available as a fallback
+    even when live API discovery fails or ANTHROPIC_API_KEY is absent."""
+    values = [m["value"] for m in ks.DEFAULT_MODELS]
+    assert "claude-fable-5" in values, "Fable 5 missing from DEFAULT_MODELS"
+
+
+def test_discover_models_tries_auth_token_when_api_key_absent(monkeypatch):
+    """discover_models should fall back to ANTHROPIC_AUTH_TOKEN when ANTHROPIC_API_KEY
+    is absent. In Claude Code OAuth environments, only ANTHROPIC_AUTH_TOKEN may be set."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "test-auth-token")
+
+    payload = {"data": [
+        {"id": "claude-fable-5", "display_name": "Fable 5"},
+        {"id": "claude-opus-4-8", "display_name": "Opus 4.8"},
+    ]}
+
+    def fake_opener(req, timeout=None):
+        return _FakeResponse(payload)
+
+    models = ks.discover_models(opener=fake_opener)
+    ids = [m["value"] for m in models]
+    assert "claude-fable-5" in ids
+    assert "claude-opus-4-8" in ids

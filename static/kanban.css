@@ -268,6 +268,9 @@ body {
 .sp-tag { font-size:10px;padding:2px 6px;border-radius:3px;background:var(--bg);color:var(--text-muted); }
 .sp-tag.dep { color:#f59e0b; }
 .sp-tag.opt { color:#8b5cf6; }
+.sp-file-list { display:flex;flex-direction:column;gap:3px; }
+.sp-file-link { font-size:11px;color:#38bdf8;text-decoration:none;font-family:monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
+.sp-file-link:hover { text-decoration:underline;color:#7dd3fc; }
 .sp-status-select {
   background:var(--bg);color:var(--text);border:1px solid #475569;
   border-radius:5px;font-size:12px;padding:5px 10px;width:100%;cursor:pointer;
@@ -432,3 +435,34 @@ body {
    stays left-aligned rather than stranding the pill alone on the right. */
 @media(max-width:1100px){ .topbar select{ min-width:160px; flex:1 1 200px; } }
 @media(max-width:780px){ .topbar select{ flex-basis:140px; } .status-indicator{ margin-left:0; } }
+/* Ticket #89: inline title + description editing */
+.sp-header h2 { flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
+.sp-title-input { flex:1;min-width:0;background:var(--surface-alt);color:var(--text);border:1px solid #3b82f6;border-radius:4px;font-size:14px;font-weight:700;padding:2px 6px;outline:none; }
+.sp-detail-edit { margin-top:4px;resize:vertical; }
+.sp-detail-edit-actions { display:flex;gap:6px;margin-top:6px; }
+
+/* Layrr live edit: topbar chips (one per running overlay) + Project Settings
+   instance rows. Chip states mirror /api/layrr/status: running (green edge),
+   starting (dashed, dim), failed (red — hover for the log tail). */
+.layrr-chip { display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;background:var(--surface-alt);font-size:11px;border:1px solid transparent;white-space:nowrap; }
+.layrr-chip a { color:var(--text);text-decoration:none;font-weight:600; }
+.layrr-chip.running { border-color:rgba(34,197,94,.4); }
+.layrr-chip.starting { opacity:.65;border-style:dashed;border-color:var(--text-muted); }
+.layrr-chip.failed { border-color:rgba(239,68,68,.55);background:rgba(239,68,68,.12); }
+.layrr-chip button { background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:13px;padding:0 2px;line-height:1; }
+.layrr-chip button:hover { color:#ef4444; }
+.layrr-inst { display:flex;align-items:center;gap:8px;margin:4px 0;flex-wrap:wrap; }
+.layrr-inst a { color:inherit; }
+.layrr-dot { width:8px;height:8px;border-radius:50%;background:var(--text-muted);flex:none; }
+.layrr-dot.running { background:#22c55e; }
+.layrr-dot.starting { background:#f59e0b;animation:layrrPulse 1.2s infinite; }
+.layrr-dot.failed { background:#ef4444; }
+@keyframes layrrPulse { 50% { opacity:.35; } }
+
+/* Done-column Clear button (hide done tickets; files stay on disk) */
+.col-clear-btn { margin-left:auto;background:none;border:1px solid var(--surface-alt);border-radius:6px;color:var(--text-muted);font-size:10px;padding:1px 8px;cursor:pointer;line-height:1.6; }
+.col-clear-btn:hover { color:#ef4444;border-color:rgba(239,68,68,.5); }
+
+/* Ticket #109: merge-branch field on tickets */
+.sp-merge-banner { margin:8px 0;padding:7px 10px;border-radius:6px;background:rgba(34,197,94,.12);border:1px solid rgba(34,197,94,.35);color:#4ade80;font-size:12px; }
+.sp-branch-input { margin-top:2px; }

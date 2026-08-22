@@ -17,6 +17,7 @@ import json
 import os
 import re
 import secrets
+import subprocess
 import sys
 import threading
 import time
@@ -28,6 +29,7 @@ from urllib.request import Request, urlopen
 
 import orchestrator_core as _oc
 import perf_monitor
+import layrr_launcher as _layrr
 
 
 def _atomic_write_json(path, data):
@@ -49,6 +51,14 @@ def _atomic_write_json(path, data):
 
 # --- Config ---
 PORT = 8745
+# The port this process actually bound (set by main(); argv/env/server.json can
+# all move it off the default). Spawned layrr instances call back into the API
+# (ticket filing, widget polling), so they need our real base URL, not PORT.
+BOUND_PORT = None
+
+
+def kanban_base_url():
+    return f"http://127.0.0.1:{BOUND_PORT or PORT}"
 # Bind to loopback by default so the board is not reachable from other LAN hosts
 # (the API exposes destructive endpoints: perf_kill, server/restart, DELETE task).
 # Override with KANBAN_HOST=0.0.0.0 to expose it deliberately on a trusted network.
@@ -77,12 +87,41 @@ def allowed_origin(origin):
     return None
 
 
-# This script lives directly inside .kanban/, so the board root is its own dir.
-KANBAN_DIR = os.path.dirname(os.path.abspath(__file__))
-HTML_PATH = os.path.join(KANBAN_DIR, "kanban.html")
-CSS_PATH = os.path.join(KANBAN_DIR, "kanban.css")
-JS_PATH = os.path.join(KANBAN_DIR, "kanban.js")
+# This module lives in .kanban/app/, so the board root is its parent dir.
+KANBAN_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+STATIC_DIR = os.path.join(KANBAN_DIR, "static")
+HTML_PATH = os.path.join(STATIC_DIR, "kanban.html")
+CSS_PATH = os.path.join(STATIC_DIR, "kanban.css")
+JS_PATH = os.path.join(STATIC_DIR, "kanban.js")
+# Ticket widget injected into layrr-proxied pages (see layrr_launcher.py).
+LAYRR_WIDGET_PATH = os.path.join(STATIC_DIR, "layrr-widget.js")
 META_FILE = "_meta.json"
+# Board directories live under a dedicated `boards/` folder (ticket #94), which
+# is gitignored — keeping the .kanban root clean of loose board dirs mixed in
+# with source. Board discovery and per-board path resolution route through
+# boards_root() so the location is defined once and honors a monkeypatched
+# KANBAN_DIR (it re-derives from KANBAN_DIR at call time rather than being a
+# frozen module constant).
+BOARDS_SUBDIR = "boards"
+
+
+def boards_root():
+    """Absolute path to the dedicated folder that holds every board dir."""
+    return os.path.join(KANBAN_DIR, BOARDS_SUBDIR)
+
+
+def _scandir_boards():
+    """Scan the boards folder, yielding its entries (empty if it doesn't exist).
+
+    A fresh tree may not have created `boards/` yet, so a missing folder is not
+    an error — it just means there are no boards.
+    """
+    try:
+        return list(os.scandir(boards_root()))
+    except FileNotFoundError:
+        return []
+
+
 # Specs / plans live as markdown under .kanban/docs/. A doc associates itself
 # with a ticket via a `**Ticket:** `.kanban/<board>/<id>.json`` line in its header
 # (the convention used by the brainstorming/writing-plans skills).
@@ -160,6 +199,7 @@ DEFAULT_MODELS = [
     {"value": "claude-haiku-4-5-20251001", "label": "Haiku (small)"},
     {"value": "claude-sonnet-4-6", "label": "Sonnet (medium)"},
     {"value": "claude-opus-4-8", "label": "Opus (large)"},
+    {"value": "claude-fable-5", "label": "Fable 5"},
 ]
 
 MODELS_API_URL = "https://api.anthropic.com/v1/models"
@@ -177,7 +217,8 @@ def discover_models(api_key=None, url=None, timeout=MODELS_API_TIMEOUT, opener=N
     sorted by id for a stable picklist order.
     """
     if api_key is None:
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        api_key = (os.environ.get("ANTHROPIC_API_KEY")
+                   or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
     if not api_key:
         return list(DEFAULT_MODELS)
 
@@ -280,7 +321,7 @@ def board_dir(slug):
     safe = safe_segment(slug)
     if safe is None:
         return None, slug
-    return os.path.join(KANBAN_DIR, safe), safe
+    return os.path.join(boards_root(), safe), safe
 
 
 def ticket_path(board_path, task_id):
@@ -320,6 +361,25 @@ def board_mtime(board_path):
     return latest
 
 
+def docs_mtime():
+    """Newest mtime across markdown under .kanban/docs/ (0.0 when absent).
+
+    Folded into every board payload's `mtime` so a spec/plan edit invalidates
+    the `?since=` short-circuit and triggers a client re-render. Re-derives
+    the docs path from KANBAN_DIR at call time (KANBAN_DIR is monkeypatched
+    in tests; the module-level DOCS_DIR constant would go stale).
+    """
+    latest = 0.0
+    for root, _dirs, files in os.walk(os.path.join(KANBAN_DIR, "docs")):
+        for name in files:
+            if name.lower().endswith(".md"):
+                try:
+                    latest = max(latest, os.stat(os.path.join(root, name)).st_mtime)
+                except OSError:
+                    continue
+    return latest
+
+
 def touch_meta(board_path):
     """Bump _meta.json's `updated` field to today's date."""
     meta_path = os.path.join(board_path, META_FILE)
@@ -337,6 +397,18 @@ def touch_meta(board_path):
 
 def write_ticket(path, task):
     _atomic_write_json(path, task)
+
+
+def is_cleared_task(task):
+    """True when a ticket should be hidden from board payloads.
+
+    "Clear done" (the Done-column broom button) stamps `cleared: true` on done
+    tickets — the file stays exactly where it is, it just stops showing up.
+    The done-column check makes the hide self-healing: if an agent later moves
+    a cleared ticket's status back to something active, it reappears without
+    anyone having to find and strip the flag.
+    """
+    return bool(task.get("cleared")) and get_task_column(task.get("status", "")) == "done"
 
 
 # --- Spec / plan discovery --------------------------------------------------
@@ -479,7 +551,7 @@ def read_doc(rel_path):
 
 def scan_boards():
     boards = []
-    for entry in sorted(os.scandir(KANBAN_DIR), key=lambda e: e.name):
+    for entry in sorted(_scandir_boards(), key=lambda e: e.name):
         if not entry.is_dir() or not is_board(entry.path):
             continue
         slug = entry.name
@@ -503,7 +575,7 @@ def load_all_boards():
     tasks = []
     latest_mtime = 0.0
     spec_index = build_spec_index()
-    for entry in sorted(os.scandir(KANBAN_DIR), key=lambda e: e.name):
+    for entry in sorted(_scandir_boards(), key=lambda e: e.name):
         if not entry.is_dir() or not is_board(entry.path):
             continue
         slug = entry.name
@@ -519,6 +591,8 @@ def load_all_boards():
                 with open(tp, "r", encoding="utf-8") as f:
                     task = json.load(f)
             except (json.JSONDecodeError, OSError):
+                continue
+            if is_cleared_task(task):
                 continue
             task["_column"] = get_task_column(task.get("status", ""))
             task["_board"] = slug
@@ -536,7 +610,9 @@ def load_all_boards():
         "updated": "",
         "filename": ALL_SLUG,
         "tasks": tasks,
-        "mtime": latest_mtime,
+        # Same formula as board_snapshot_mtime(ALL_SLUG) — the two must stay
+        # in lockstep or the ?since= short-circuit never (or always) fires.
+        "mtime": max(latest_mtime, docs_mtime()),
         "columns": COLUMNS,
     }, 200
 
@@ -563,6 +639,8 @@ def load_board(slug):
                 task = json.load(f)
         except (json.JSONDecodeError, OSError):
             continue
+        if is_cleared_task(task):
+            continue
         task["_column"] = get_task_column(task.get("status", ""))
         task["_board"] = safe
         task["_filePath"] = os.path.abspath(tp).replace("\\", "/")
@@ -575,13 +653,15 @@ def load_board(slug):
         "updated": meta.get("updated", ""),
         "filename": safe,
         "tasks": tasks,
-        "mtime": board_mtime(path),
+        # Same formula as board_snapshot_mtime(slug) — the two must stay in
+        # lockstep or the ?since= short-circuit never (or always) fires.
+        "mtime": max(board_mtime(path), docs_mtime()),
         "columns": COLUMNS,
     }
     # Pass through optional board-level metadata if present.
     for key in ("context", "openQuestions", "outOfScope", "commitRequirements",
                 "directory", "useWorktrees", "useDocker", "envVars",
-                "passthroughEnv"):
+                "passthroughEnv", "layrr", "showMergeBranch"):
         if key in meta:
             result[key] = meta[key]
     # Surface the one-paragraph context blurb as a flat field for the settings
@@ -589,6 +669,49 @@ def load_board(slug):
     if isinstance(meta.get("context"), dict) and meta["context"].get("description"):
         result["description"] = meta["context"]["description"]
     return result, 200
+
+
+def board_snapshot_mtime(slug):
+    """Stat-only recomputation of the payload `mtime` load_board would return.
+
+    Used by board_get's ?since= short-circuit: file stats only — no ticket
+    JSON opens, no spec-index rebuild — so idle polls stay invisible to
+    on-access file scanning. Must stay in lockstep with load_board's payload
+    mtime (same formula), else the short-circuit never (or always) fires.
+    Returns None for an unknown board so the caller falls through to the full
+    load (which 404s as before).
+    """
+    if slug == ALL_SLUG:
+        latest = 0.0
+        for entry in _scandir_boards():
+            if entry.is_dir() and is_board(entry.path):
+                latest = max(latest, board_mtime(entry.path))
+        return max(latest, docs_mtime())
+    path, _safe = board_dir(slug)
+    if path is None or not is_board(path):
+        return None
+    return max(board_mtime(path), docs_mtime())
+
+
+def board_get(slug, since=None):
+    """GET /api/board/<slug>[?since=<mtime>] — full payload, or a cheap
+    {"unchanged": true} answer when nothing changed since `since`.
+
+    Polling clients echo back the `mtime` of the last payload they rendered;
+    when the stat-only snapshot still matches, the server skips the full load
+    entirely. A malformed `since`, an unknown board, or any mtime drift falls
+    through to load_board (unknown slugs keep their 404).
+    """
+    if since is not None:
+        try:
+            since_f = float(since)
+        except (TypeError, ValueError):
+            since_f = None
+        if since_f is not None:
+            snap = board_snapshot_mtime(slug)
+            if snap is not None and snap == since_f:
+                return {"unchanged": True, "mtime": snap}, 200
+    return load_board(slug)
 
 
 # Board-level metadata fields the UI is allowed to edit. `commitRequirements`
@@ -603,9 +726,13 @@ def load_board(slug):
 # orchestrator env, never on disk). The flat `description` field is handled
 # specially (merged into `context.description`); `envVars` and `passthroughEnv`
 # are sanitized specially (a dict / a list of names, not a scalar) just below.
+# `layrr` is the per-board live-edit block ({targetPort, projectRoot,
+# baseBranch, column}) consumed by layrr_launcher.start(); sanitized specially
+# below (a dict of typed fields, not a scalar).
 EDITABLE_META_FIELDS = ("project", "context", "openQuestions", "outOfScope",
                         "commitRequirements", "directory", "useWorktrees",
-                        "useDocker", "envVars", "passthroughEnv")
+                        "useDocker", "envVars", "passthroughEnv", "layrr",
+                        "showMergeBranch")
 
 
 def update_board_meta(slug, payload):
@@ -656,12 +783,27 @@ def update_board_meta(slug, payload):
             else:
                 meta.pop(key, None)
             continue
+        # `layrr` is a typed settings dict (live-edit): sanitize field-by-field
+        # and remove the block entirely when nothing survives.
+        if key == "layrr":
+            clean = _layrr.sanitize_cfg(value)
+            if clean:
+                meta[key] = clean
+            else:
+                meta.pop(key, None)
+            continue
         if isinstance(value, str):
             value = value.strip()
         if value == "" or value is None:
             meta.pop(key, None)
         else:
             meta[key] = value
+
+    # When Docker is explicitly turned off, container-only fields are meaningless
+    # — remove them so no stale config sits around on a non-Docker board (ticket #87).
+    if "useDocker" in payload and not _oc.use_docker(meta):
+        meta.pop("envVars", None)
+        meta.pop("passthroughEnv", None)
 
     # `description` is a flat alias for context.description — merge it into the
     # existing `context` object rather than overwriting its other structured keys.
@@ -719,6 +861,13 @@ def update_task_status(slug, task_id, new_column):
 
     old_status = task.get("status", "todo")
     new_status = COLUMN_STATUS[new_column]
+
+    # Ticket #100: prevent moving to "ready" without a real model specified.
+    # An empty model field displays as "(default)" in the UI, which is confusing
+    # and should not be allowed to dispatch.
+    if new_status == "ready" and not (task.get("model") or "").strip():
+        return {"error": "cannot move to ready: no model specified (model cannot be '(default)')"}, 400
+
     entry = {
         "action": "status_change",
         "from": old_status,
@@ -730,6 +879,15 @@ def update_task_status(slug, task_id, new_column):
     # Moving OUT of in_progress while a session is live → kill it first.
     if old_status == "in_progress" and new_status != "in_progress":
         _ui_kill_session(KANBAN_DIR, slug, task)
+
+    # Ticket #97: moving OUT of blocked clears orchestrator.question so the
+    # notification bell stops showing this ticket as needing human attention.
+    # If the ticket re-blocks later, the agent writes a fresh question which
+    # naturally re-triggers the bell.
+    if old_status == "blocked" and new_status != "blocked":
+        orch = task.get("orchestrator")
+        if isinstance(orch, dict) and "question" in orch:
+            del orch["question"]
 
     task["status"] = new_status
     task.setdefault("history", []).append(entry)
@@ -840,6 +998,48 @@ def update_task_model(slug, task_id, model):
     return {"ok": True, "taskId": task_id, "model": model}, 200
 
 
+def update_task_fields(slug, task_id, title, detail, merge_branch=None):
+    """Update a ticket's title, detail text, and/or mergeBranch. Any may be None to leave unchanged.
+    Follows the re-read-before-write pattern so concurrent writes aren't clobbered."""
+    path, _ = board_dir(slug)
+    if path is None or not is_board(path):
+        return {"error": "board not found"}, 404
+
+    tp = ticket_path(path, task_id)
+    if tp is None or not os.path.isfile(tp):
+        return {"error": f"task {task_id} not found"}, 404
+
+    if title is not None and not title.strip():
+        return {"error": "title cannot be empty"}, 400
+
+    try:
+        with open(tp, "r", encoding="utf-8") as f:
+            task = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        return {"error": str(e)}, 500
+
+    if title is not None:
+        task["title"] = title.strip()
+    if detail is not None:
+        if detail.strip():
+            task["detail"] = detail.strip()
+        else:
+            task.pop("detail", None)
+    if merge_branch is not None:
+        if merge_branch.strip():
+            task["mergeBranch"] = merge_branch.strip()
+        else:
+            task.pop("mergeBranch", None)
+
+    try:
+        write_ticket(tp, task)
+    except OSError as e:
+        return {"error": str(e)}, 500
+    touch_meta(path)
+
+    return {"ok": True, "taskId": task_id}, 200
+
+
 def create_task(slug, payload):
     path, _ = board_dir(slug)
     if path is None or not is_board(path):
@@ -913,6 +1113,39 @@ def delete_task(slug, task_id):
     touch_meta(path)
 
     return {"ok": True, "deletedId": task_id}, 200
+
+
+def clear_done_tasks(slug):
+    """POST /api/board/<slug>/clear-done — hide every done ticket on the board.
+
+    The files are not moved or deleted: each done ticket is stamped
+    `cleared: true` (+ `clearedAt`) in place, and board payloads skip tickets
+    that are cleared AND done (is_cleared_task). History, comments and id
+    numbering are all untouched.
+    """
+    path, _ = board_dir(slug)
+    if path is None or not is_board(path):
+        return {"error": "board not found"}, 404
+
+    cleared = 0
+    for tp in list_ticket_files(path):
+        try:
+            with open(tp, "r", encoding="utf-8") as f:
+                task = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            continue
+        if task.get("cleared") or get_task_column(task.get("status", "")) != "done":
+            continue
+        task["cleared"] = True
+        task["clearedAt"] = now_iso()
+        try:
+            write_ticket(tp, task)
+        except OSError:
+            continue
+        cleared += 1
+    if cleared:
+        touch_meta(path)
+    return {"ok": True, "cleared": cleared}, 200
 
 
 def add_comment(slug, task_id, payload):
@@ -1037,10 +1270,36 @@ def server_restart():
     stop_orchestrator()  # release single-instance lock for the new image
 
     def _reexec():
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+        # On Windows os.execv rebuilds the child's command line WITHOUT quoting
+        # its arguments, so an interpreter path containing a space — the default
+        # "C:\Program Files\Python312\python.exe" — is split at the space and the
+        # restart dies with `C:\Program: can't open file ...`. That silently
+        # kills the server (and its orchestrator loop) instead of restarting it.
+        # Spawn a fresh process there instead (Popen quotes argv correctly via
+        # CreateProcess) and exit this one; HTTPServer sets allow_reuse_address so
+        # the child rebinds the port while this socket is still closing. POSIX
+        # keeps the clean in-place execv (same PID, no rebind race).
+        if sys.platform == "win32":
+            subprocess.Popen([sys.executable] + sys.argv)
+            os._exit(0)
+        else:
+            os.execv(sys.executable, [sys.executable] + sys.argv)
 
     threading.Timer(0.3, _reexec).start()
     return {"ok": True}, 200
+
+
+def layrr_start(slug):
+    """POST /api/layrr/start/<slug> — go live per the board's `layrr` block."""
+    path, _safe = board_dir(slug)
+    if path is None or not is_board(path):
+        return {"error": "board not found"}, 404
+    try:
+        with open(os.path.join(path, META_FILE), "r", encoding="utf-8") as f:
+            meta = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        return {"error": str(e)}, 500
+    return _layrr.start(KANBAN_DIR, slug, meta, kanban_base_url())
 
 
 def orch_state_get():
@@ -1076,6 +1335,69 @@ def orch_state_put(payload):
     return state, 200
 
 
+# --- Server config (CPU cap etc.) -------------------------------------------
+
+def _read_server_config_raw():
+    """Return the raw server.json dict (host/port/cpuLimitPercent), or {}."""
+    try:
+        with open(SERVER_CONFIG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def server_config_get():
+    """Expose the editable server settings the UI can tune (CPU cap).
+
+    `effectivePercent` is the cap actually in force after precedence (0 = no
+    cap). `envOverride` is true when KANBAN_CPU_LIMIT is set, in which case
+    edits to server.json are persisted but do not change what's applied.
+    """
+    import cpu_limiter
+    raw = _read_server_config_raw()
+    effective = cpu_limiter.resolve_limit_percent(SERVER_CONFIG_PATH)
+    return {
+        "cpuLimitPercent": raw.get("cpuLimitPercent"),
+        "effectivePercent": effective or 0,
+        "envOverride": os.environ.get("KANBAN_CPU_LIMIT") is not None,
+    }, 200
+
+
+def server_config_put(payload):
+    """Persist a new CPU cap to server.json and re-apply it live.
+
+    Preserves the other keys (host/port). The value is clamped to 0..100 (0
+    disables the cap). The live re-apply respects env precedence: what gets
+    applied is the resolved effective cap, so a KANBAN_CPU_LIMIT override still
+    wins even though the file is updated.
+    """
+    import cpu_limiter
+    if not isinstance(payload, dict) or "cpuLimitPercent" not in payload:
+        return {"error": "cpuLimitPercent required"}, 400
+    try:
+        percent = int(payload["cpuLimitPercent"])
+    except (TypeError, ValueError):
+        return {"error": "cpuLimitPercent must be an integer"}, 400
+    percent = max(0, min(percent, 100))
+
+    data = _read_server_config_raw()
+    data["cpuLimitPercent"] = percent
+    try:
+        _atomic_write_json(SERVER_CONFIG_PATH, data)
+    except OSError:
+        return {"error": "could not write server config"}, 500
+
+    effective = cpu_limiter.resolve_limit_percent(SERVER_CONFIG_PATH)
+    applied = cpu_limiter.set_cpu_limit(effective)
+    return {
+        "cpuLimitPercent": percent,
+        "effectivePercent": effective or 0,
+        "applied": bool(applied),
+        "envOverride": os.environ.get("KANBAN_CPU_LIMIT") is not None,
+    }, 200
+
+
 # --- Task 7: Activity, kill, answer -----------------------------------------
 
 def orch_activity():
@@ -1087,7 +1409,7 @@ def _ticket_file(board, task_id):
     isafe = _oc.safe_name(f"{task_id}.json")
     if bsafe is None or isafe is None:
         return None
-    return os.path.join(KANBAN_DIR, bsafe, isafe)
+    return os.path.join(boards_root(), bsafe, isafe)
 
 
 # --- Live logs -------------------------------------------------------------
@@ -1314,13 +1636,73 @@ def orch_chat_get(board, task_id):
 
 # --- Performance monitor ----------------------------------------------------
 
+# TTL cache for the _ticket_agent_pids disk scan. The perf sampler calls
+# _owned_pids every ~3s; re-reading every board's ticket JSON that often burned
+# ~15-20% of a core at idle (and each file open is also scanned by the
+# endpoint-security filter driver, multiplying the cost in kernel time). The
+# scan only exists to recover PIDs dispatched before a server restart — newly
+# dispatched agents are tracked in-memory via _PROCS — so staleness up to the
+# TTL is cosmetic (Performance-tab owned/external labeling only).
+_TICKET_PIDS_TTL = 30.0
+_ticket_pids_cache = {"at": None, "pids": set()}
+
+
+def _ticket_pids_cache_clear():
+    _ticket_pids_cache["at"] = None
+    _ticket_pids_cache["pids"] = set()
+
+
+def _ticket_agent_pids(now=None):
+    """Scan all board ticket files for in_progress orchestrator PIDs.
+
+    After a server reboot _PROCS is empty, so this recovers the PIDs that were
+    dispatched before the restart.  Only in_progress / blocked tickets are
+    included — completed tickets' PIDs may have been reused by the OS.
+
+    The scan result is cached for _TICKET_PIDS_TTL seconds (see note above).
+    """
+    if now is None:
+        now = time.monotonic()
+    at = _ticket_pids_cache["at"]
+    if at is not None and (now - at) < _TICKET_PIDS_TTL:
+        return _ticket_pids_cache["pids"]
+    pids = set()
+    try:
+        for entry in _scandir_boards():
+            if not entry.is_dir() or not is_board(entry.path):
+                continue
+            for tfile in os.scandir(entry.path):
+                if not tfile.is_file() or not tfile.name.endswith(".json") or tfile.name == META_FILE:
+                    continue
+                try:
+                    with open(tfile.path, "r", encoding="utf-8") as f:
+                        t = json.load(f)
+                except Exception:
+                    continue
+                if t.get("status") not in ("in_progress", "blocked"):
+                    continue
+                orch = t.get("orchestrator") or {}
+                pid = orch.get("pid")
+                if isinstance(pid, int):
+                    pids.add(pid)
+    except Exception:
+        pass
+    _ticket_pids_cache["at"] = now
+    _ticket_pids_cache["pids"] = pids
+    return pids
+
+
 def _owned_pids():
-    """PIDs the orchestrator owns: ticket agents (_PROCS) + server background ops (_SERVER_OPS)."""
+    """PIDs the orchestrator owns: ticket agents (_PROCS) + server background ops (_SERVER_OPS).
+
+    Also recovers in_progress ticket PIDs from disk so sessions spawned before a
+    server reboot are not shown as external in the Performance tab.
+    """
     try:
         import orchestrator as _orch
-        return set(_orch._PROCS.keys()) | set(_orch._SERVER_OPS.keys())
+        return set(_orch._PROCS.keys()) | set(_orch._SERVER_OPS.keys()) | _ticket_agent_pids()
     except Exception:
-        return set()
+        return _ticket_agent_pids()
 
 
 def _server_op_labels():
@@ -1457,26 +1839,60 @@ def _nudge_initial_triage(kanban_dir, task, all_tasks):
     return _orch._real_sonnet_triage(kanban_dir, task, all_tasks)
 
 
+# Serialization state for nudge: at most one tick runs at a time; at most one
+# follow-up tick waits in the backlog.
+_nudge_lock = threading.Lock()
+_nudge_running = False   # True while a tick thread is executing
+_nudge_queued = False    # True when a follow-up tick is waiting
+
+
+def orch_nudge_tick():
+    """Execute one nudge tick (real implementation).
+
+    Exposed as a module-level name so tests can monkeypatch it.
+    """
+    import orchestrator as _orch
+    _orch.tick(KANBAN_DIR, opus_triage=_nudge_opus_triage,
+               initial_triage=_nudge_initial_triage)
+
+
 def orch_nudge():
     """Trigger an immediate orchestrator tick in a background daemon thread.
 
-    The nudge does not wait for the tick to complete — it queues it and returns
-    immediately so the HTTP response is not held open for the full tick duration
-    (which can be tens of seconds when triage calls Opus). The tick uses the
-    same `_nudge_opus_triage` and `_nudge_initial_triage` seams so tests can
-    stub them out.
+    Only one tick runs at a time.  If nudge is called while a tick is running,
+    a single follow-up tick is queued (additional calls are no-ops — the cap is
+    1 queued item).  The queued tick fires automatically when the current one
+    finishes.
+
+    The call always returns immediately so the HTTP response is not held open for
+    the full tick duration (which can be tens of seconds when triage calls Opus).
     """
-    import orchestrator as _orch
+    global _nudge_running, _nudge_queued
+
+    with _nudge_lock:
+        if _nudge_running:
+            # Cap backlog at 1.
+            _nudge_queued = True
+            return {"ok": True, "queued": True}, 200
+        _nudge_running = True
 
     def _run():
-        try:
-            _orch.tick(KANBAN_DIR, opus_triage=_nudge_opus_triage,
-                       initial_triage=_nudge_initial_triage)
-        except Exception as e:
-            _oc.append_activity(KANBAN_DIR, {
-                "ts": now_iso(), "kind": "error",
-                "message": f"nudge tick failed: {e}",
-            })
+        global _nudge_running, _nudge_queued
+        while True:
+            try:
+                orch_nudge_tick()
+            except Exception as e:
+                _oc.append_activity(KANBAN_DIR, {
+                    "ts": now_iso(), "kind": "error",
+                    "message": f"nudge tick failed: {e}",
+                })
+            with _nudge_lock:
+                if _nudge_queued:
+                    _nudge_queued = False
+                    # Loop around to run the queued tick.
+                    continue
+                _nudge_running = False
+                break
 
     t = threading.Thread(target=_run, name="nudge-tick", daemon=True)
     t.start()
@@ -1507,7 +1923,8 @@ class KanbanHandler(BaseHTTPRequestHandler):
                 self.send_error(404)
         elif path.startswith("/api/board/"):
             slug = unquote(path[len("/api/board/"):])
-            data, status = load_board(slug)
+            since = parse_qs(parsed.query).get("since", [None])[0]
+            data, status = board_get(slug, since)
             self._json(data, status)
         elif path == "/api/models":
             self._json(*models_list())
@@ -1518,6 +1935,8 @@ class KanbanHandler(BaseHTTPRequestHandler):
             self._json(*profile_get(name))
         elif path == "/api/orchestrator/state":
             self._json(*orch_state_get())
+        elif path == "/api/server/config":
+            self._json(*server_config_get())
         elif path == "/api/orchestrator/activity":
             self._json(*orch_activity())
         # GET /api/orchestrator/chat/<board>/<id> — agent-chat queue status
@@ -1529,6 +1948,8 @@ class KanbanHandler(BaseHTTPRequestHandler):
                 self.send_error(404)
         elif path == "/api/performance":
             self._json(*perf_snapshot())
+        elif path == "/api/layrr/status":
+            self._json(*_layrr.status(KANBAN_DIR))
         elif path.startswith("/api/doc/"):
             text, status = read_doc(path[len("/api/doc/"):])
             if text is None:
@@ -1541,6 +1962,8 @@ class KanbanHandler(BaseHTTPRequestHandler):
             self._serve_static(CSS_PATH, "text/css; charset=utf-8")
         elif path == "/kanban.js":
             self._serve_static(JS_PATH, "application/javascript; charset=utf-8")
+        elif path == "/layrr-widget.js":
+            self._serve_static(LAYRR_WIDGET_PATH, "application/javascript; charset=utf-8")
         else:
             self.send_error(404)
 
@@ -1577,6 +2000,11 @@ class KanbanHandler(BaseHTTPRequestHandler):
             if payload is None:
                 return
             self._json(*orch_state_put(payload))
+        elif len(parts) == 4 and parts[1] == "api" and parts[2] == "server" and parts[3] == "config":
+            payload = self._read_json()
+            if payload is None:
+                return
+            self._json(*server_config_put(payload))
         # PUT /api/board/<slug>/meta — edit board-level metadata
         elif len(parts) == 5 and parts[1] == "api" and parts[2] == "board" and parts[4] == "meta":
             slug = unquote(parts[3])
@@ -1604,6 +2032,13 @@ class KanbanHandler(BaseHTTPRequestHandler):
                 result, status = update_task_model(slug, task_id, payload.get("model", ""))
             elif "order" in payload:
                 result, status = update_task_order(slug, task_id, payload.get("order"))
+            elif "title" in payload or "detail" in payload or "mergeBranch" in payload:
+                result, status = update_task_fields(
+                    slug, task_id,
+                    payload.get("title"),
+                    payload.get("detail"),
+                    payload.get("mergeBranch"),
+                )
             else:
                 result, status = update_task_status(slug, task_id, payload.get("column", ""))
             self._json(result, status)
@@ -1655,6 +2090,19 @@ class KanbanHandler(BaseHTTPRequestHandler):
         # POST /api/orchestrator/nudge — immediate tick
         elif len(parts) == 4 and parts[1] == "api" and parts[2] == "orchestrator" and parts[3] == "nudge":
             self._json(*orch_nudge())
+
+        # POST /api/board/<slug>/clear-done — hide all done tickets (files stay)
+        elif len(parts) == 5 and parts[1] == "api" and parts[2] == "board" and parts[4] == "clear-done":
+            self._json(*clear_done_tasks(unquote(parts[3])))
+
+        # POST /api/layrr/start/<board> — go live: layrr proxy over the board's
+        # already-running dev server (config in the board's `layrr` meta block)
+        elif len(parts) == 5 and parts[1] == "api" and parts[2] == "layrr" and parts[3] == "start":
+            self._json(*layrr_start(unquote(parts[4])))
+
+        # POST /api/layrr/stop/<instance-id>
+        elif len(parts) == 5 and parts[1] == "api" and parts[2] == "layrr" and parts[3] == "stop":
+            self._json(*_layrr.stop(KANBAN_DIR, unquote(parts[4])))
 
         # POST /api/server/restart
         elif len(parts) == 4 and parts[1] == "api" and parts[2] == "server" and parts[3] == "restart":
@@ -1784,6 +2232,19 @@ class KanbanHandler(BaseHTTPRequestHandler):
 
 
 def main():
+    # Kernel-level CPU cap (Windows Job Object hard cap) on the server process
+    # only — the orchestrator tick loop and perf sampler are threads in this
+    # process and share the cap; child processes (dispatched agents, git)
+    # break away from the job at spawn and run uncapped. See cpu_limiter.py
+    # for the KANBAN_CPU_LIMIT / cpuLimitPercent resolution rules.
+    import cpu_limiter
+
+    cpu_pct = cpu_limiter.resolve_limit_percent(SERVER_CONFIG_PATH)
+    if cpu_limiter.apply_cpu_limit(cpu_pct):
+        print(f"CPU hard-capped at {cpu_pct}% of total system CPU (kernel job object)")
+    elif cpu_pct:
+        print(f"WARNING: could not apply {cpu_pct}% CPU cap; running uncapped")
+
     cfg = load_server_config()
     # Precedence, most explicit wins:
     #   host: KANBAN_HOST env  >  server.json  >  built-in loopback default
@@ -1795,6 +2256,8 @@ def main():
         port = int(os.environ["KANBAN_PORT"])
     else:
         port = cfg["port"]
+    global BOUND_PORT
+    BOUND_PORT = port
     server = HTTPServer((host, port), KanbanHandler)
     print(f"Kanban server running at http://localhost:{port} (bound to {host})")
     print(f"Serving boards from: {KANBAN_DIR}")

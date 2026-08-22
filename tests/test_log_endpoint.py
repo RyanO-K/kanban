@@ -29,6 +29,23 @@ def test_assistant_text_turn():
     assert turns[0]["seq"] == 0
 
 
+def test_string_message_line_skipped():
+    # The CLI stamps a plain-string `message` on system/permission_denied lines;
+    # the parser must skip it, not crash (it wedged the orchestrator tick loop).
+    log = "\n".join([
+        _line({"type": "system", "subtype": "permission_denied",
+               "tool_name": "PowerShell",
+               "message": "Command contains script block that may execute arbitrary code"}),
+        _line({"type": "assistant",
+               "message": "bare string assistant message"}),
+        _line({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "still parsed"}
+        ]}}),
+    ])
+    turns = ks.parse_log_turns(log)
+    assert [t["text"] for t in turns] == ["still parsed"]
+
+
 def test_thinking_block_included():
     log = _line({"type": "assistant", "message": {"content": [
         {"type": "thinking", "thinking": "Let me reason about this."}
@@ -184,7 +201,7 @@ def test_resolve_run_log_confines_to_runs(monkeypatch, tmp_path):
 
 def _make_tree(monkeypatch, tmp_path, marker, status="in_progress", log_text=None):
     kanban = tmp_path / ".kanban"
-    board = kanban / "demo"
+    board = kanban / "boards" / "demo"
     runs = kanban / "_orchestrator" / "runs"
     board.mkdir(parents=True)
     runs.mkdir(parents=True)
@@ -242,7 +259,7 @@ def test_task_log_completed_no_orchestrator_uses_completed_log(monkeypatch, tmp_
     saved completedLog turns in that state.
     """
     kanban = tmp_path / ".kanban"
-    board = kanban / "demo"
+    board = kanban / "boards" / "demo"
     runs = kanban / "_orchestrator" / "runs"
     board.mkdir(parents=True)
     runs.mkdir(parents=True)
@@ -278,7 +295,7 @@ def test_task_log_runlogfile_survives_clear_marker(monkeypatch, tmp_path):
     top-level `runLogFile` makes it survive clear_marker so task_log can serve it.
     """
     kanban = tmp_path / ".kanban"
-    board = kanban / "demo"
+    board = kanban / "boards" / "demo"
     runs = kanban / "_orchestrator" / "runs"
     board.mkdir(parents=True)
     runs.mkdir(parents=True)

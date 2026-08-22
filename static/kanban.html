@@ -20,6 +20,9 @@
   <button class="add-btn" id="markAllReadBtn" style="display:none;background:var(--surface-alt);color:var(--text);" title="Mark all unread tickets as read">&#x2713; Mark all read</button>
   <button class="add-btn" id="addBtn">+ New Task</button>
   <div class="status-indicator">
+    <!-- One chip per live layrr overlay (board + proxy port). Click opens the
+         overlay; ✕ stops it. Populated by renderLayrrChips() from /api/layrr/status. -->
+    <div id="layrrChips" style="display:flex;gap:6px;align-items:center;"></div>
     <!-- Ticket #3: notification bell — count of blocked tickets awaiting a human
          decision. Badge hidden at 0; click opens the Needs-attention modal. -->
     <button class="bell-btn" id="bellBtn" type="button" aria-label="Blocked tickets needing input" title="No tickets need your input">
@@ -42,13 +45,19 @@
   </div>
 </div>
 <!-- Setup: merged project-agnostic config + live orchestrator controls (ticket #64).
-     Holds the orchestrator panel (live controls + inbox/in-flight/activity) above the
-     profiles panel (concurrency cap + agent profiles). renderOrchestrator()/renderProfiles()
-     keep writing into their own inner panels unchanged. -->
+     Holds the orchestrator panel (live controls + inbox/in-flight) above the
+     profiles panel (concurrency cap + agent profiles), with activity log collapsed at bottom. -->
 <div class="view-panel" id="view-setup" style="display:none;overflow:auto;height:calc(100vh - var(--topbar-h, 52px));">
   <div id="view-orchestrator" style="padding:18px 18px 0;"></div>
   <hr style="border:none;border-top:1px solid var(--surface-alt);margin:8px 18px 0;">
   <div id="view-profiles" style="padding:18px;"></div>
+  <hr style="border:none;border-top:1px solid var(--surface-alt);margin:0 18px;">
+  <details id="activityDetails" style="padding:0 18px 18px;">
+    <summary style="font-size:16px;font-weight:600;padding:14px 0 10px;cursor:pointer;list-style:none;display:flex;align-items:center;gap:6px;user-select:none;">
+      <span id="activityChevron" style="font-size:12px;transition:transform .15s;">&#9654;</span> Activity
+    </summary>
+    <div id="feed"></div>
+  </details>
 </div>
 <div class="view-panel" id="view-performance" style="display:none;padding:18px;overflow:auto;height:calc(100vh - var(--topbar-h, 52px));"></div>
 
@@ -56,7 +65,10 @@
 <div class="side-panel" id="sidePanel">
   <div class="sp-header">
     <h2 id="spTitle">Task</h2>
-    <button class="sp-close" id="spClose">&times;</button>
+    <div style="display:flex;align-items:center;gap:4px;">
+      <button class="sp-copy-btn" id="spTitleEditBtn" title="Edit title" style="padding:3px 7px;">&#x270E;</button>
+      <button class="sp-close" id="spClose">&times;</button>
+    </div>
   </div>
   <div class="sp-body" id="spBody"></div>
   <!-- Docked Create Task form lives here when the modal is "docked to sidebar" -->
@@ -102,9 +114,6 @@
       <label class="form-label">Model (optional)
         <select id="fModel" class="form-input">
           <option value="">(default - orchestrator decides)</option>
-          <option value="claude-haiku-4-5-20251001">Haiku (small)</option>
-          <option value="claude-sonnet-4-6">Sonnet (medium)</option>
-          <option value="claude-opus-4-8">Opus (large)</option>
         </select>
       </label>
       <label class="form-label form-check">
@@ -154,6 +163,11 @@
             <input type="checkbox" id="bUseDocker"> Run agents in a Docker container
           </label>
           <div style="font-size:11px;color:var(--text-muted);margin:-6px 0 14px;">When on, the orchestrator builds a per-repo Docker image and runs the dispatched agent <em>inside</em> a container (workspace mounted at <code>/workspace</code>). Requires Docker on the host and <code>ANTHROPIC_API_KEY</code> in the orchestrator's environment. Persisted as <code>useDocker</code> on _meta.json.</div>
+          <label class="form-label form-check">
+            <input type="checkbox" id="bShowMergeBranch"> Show merge branch field on tickets
+          </label>
+          <div style="font-size:11px;color:var(--text-muted);margin:-6px 0 14px;">When on, each ticket shows an editable Branch field. When a ticket is moved to Done with a branch set, the branch is highlighted as the merge target. Persisted as <code>showMergeBranch</code> on _meta.json.</div>
+          <div id="bContainerSettings" style="display:none;">
           <label class="form-label">Container environment variables
             <textarea id="bEnvVars" class="form-input form-textarea" rows="4" spellcheck="false"
               placeholder="One KEY=VALUE per line, e.g.&#10;NODE_ENV=development&#10;DATABASE_URL=postgres://..."></textarea>
@@ -164,6 +178,35 @@
               placeholder="Env-var NAMES only, e.g.&#10;GITHUB_TOKEN&#10;DATABASE_URL&#10;RENDER_API_KEY"></textarea>
           </label>
           <div style="font-size:11px;color:var(--text-muted);margin:-6px 0 14px;"><strong>Names only</strong> — the <em>value</em> of each is read from the orchestrator's own environment at dispatch and forwarded with <code>docker run -e NAME</code>. Nothing is ever written to <code>_meta.json</code>, the env-file, or the image. Use this for secrets (GitHub push token, <code>DATABASE_URL</code>, <code>RENDER_API_KEY</code>, Discord token); a listed name absent from the orchestrator env is skipped with a warning in the run log. Anthropic credentials are always forwarded automatically. Stored as <code>passthroughEnv</code> on _meta.json.</div>
+          </div>
+          <!-- Layrr live edit: attach the point-and-click overlay to a dev server
+               that is ALREADY hosting this project's site. Persisted as `layrr`
+               on _meta.json; Go live hits POST /api/layrr/start/<board>. -->
+          <hr style="border:none;border-top:1px solid var(--surface-alt);margin:4px 0 12px;">
+          <div style="font-weight:600;margin-bottom:10px;">&#x26A1; Layrr live edit</div>
+          <label class="form-label">Dev server port
+            <input type="number" id="bLayrrPort" class="form-input" min="1" max="65535" placeholder="e.g. 5273">
+          </label>
+          <div style="font-size:11px;color:var(--text-muted);margin:-6px 0 14px;">The port <strong>already hosting</strong> the site you want to edit. Go live puts the layrr proxy in front of it — it does not start the dev server for you.</div>
+          <label class="form-label">Project root (worktree serving that port)
+            <input type="text" id="bLayrrRoot" class="form-input" placeholder="e.g. C:\...\.worktrees\b2-react-layrr\...\b2react">
+          </label>
+          <div style="font-size:11px;color:var(--text-muted);margin:-6px 0 14px;">The checkout the dev server is serving from — layrr maps clicks back to source files in this tree.</div>
+          <label class="form-label">Base branch
+            <input type="text" id="bLayrrBranch" class="form-input" placeholder="working">
+          </label>
+          <div style="font-size:11px;color:var(--text-muted);margin:-6px 0 14px;">Integration branch agents merge finished tickets into (and that this worktree serves), so edits show up live for review.</div>
+          <label class="form-label">Default model for layrr tickets
+            <select id="bLayrrModel" class="form-input">
+              <option value="">(default - orchestrator decides)</option>
+            </select>
+          </label>
+          <div style="font-size:11px;color:var(--text-muted);margin:-6px 0 14px;">Every ticket layrr files gets this model override; leave on default to let triage pick per ticket.</div>
+          <div style="display:flex;gap:10px;align-items:center;margin-bottom:6px;">
+            <button type="button" class="btn btn-create" id="bLayrrGoLive">&#x26A1; Go live</button>
+            <span id="bLayrrStatus" style="font-size:12px;color:var(--text-muted);"></span>
+          </div>
+          <div id="bLayrrInstances" style="font-size:12px;"></div>
         </div>
       </div>
       <div class="form-actions">

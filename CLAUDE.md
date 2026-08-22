@@ -1,22 +1,37 @@
 # .kanban board — agent guide
 
-A lightweight file-based kanban. Each subdirectory of `.kanban/` is one **board**;
-each board holds plain JSON ticket files. There's a small Python server + HTML UI,
-but **agents normally just read and edit the JSON files directly** — no server needed.
+A lightweight file-based kanban. Boards live under a dedicated, gitignored
+`boards/` folder inside `.kanban/`; each board is one subdirectory holding plain
+JSON ticket files. There's a small Python server + HTML UI, but **agents normally
+just read and edit the JSON files directly** — no server needed.
 
 ## Layout
 
 ```
 .kanban/
-  kanban_server.py        # optional read/write API + UI server (port 8745)
-  kanban.html             # the board UI (served at /)
-  _meta.template.json     # template for a new board's _meta.json
-  <board-slug>/           # one directory per board (slug = its id)
-    _meta.json            # board metadata: project, updated, context, openQuestions, outOfScope
-    <id>.json             # one ticket per file (id is numeric: 1.json, 2.json, ...)
+  app/                    # the application (all long-running Python lives here)
+    kanban_server.py      # optional read/write API + UI server (port 8745)
+    orchestrator.py       # autonomous dispatcher runtime (tick loop, real processes)
+    orchestrator_core.py  # dispatcher decision logic (pure, unit-tested)
+    perf_monitor.py       # process/CPU roll-up for the Performance tab
+  scripts/                # one-shot maintenance scripts
+    migrate_boards_folder.py  # relocate loose root boards into boards/ (ticket #94)
+    backfill_kanban_guide.py  # stamp _kanbanGuide onto pre-existing tickets
+  static/                 # web UI assets, served by the server
+    kanban.html           # the board UI (served at /)
+    kanban.css, kanban.js
+  boards/                 # dedicated, gitignored folder holding every board (ticket #94)
+    <board-slug>/         # one directory per board (slug = its id)
+      _meta.json          # board metadata: project, updated, context, openQuestions, outOfScope
+      <id>.json           # one ticket per file (id is numeric: 1.json, 2.json, ...)
 ```
 
-A directory is only a board if it contains `_meta.json` (so `__pycache__` etc. are ignored).
+A directory under `boards/` is only a board if it contains `_meta.json` (so
+`__pycache__` etc. are ignored). The `boards/` folder is gitignored — board data
+is local per-machine state and is never tracked. Board discovery
+(`kanban_server.scan_boards`, `orchestrator.load_all_tasks`) and per-board path
+resolution route through a single `boards_root()` helper, so the location is
+defined in one place.
 
 ## Ticket shape
 
@@ -37,7 +52,7 @@ Key fields on a `<id>.json` ticket:
 `<id>.json`, and edit JSON in place. When changing `status`, append a `status_change`
 entry to `history` with a UTC timestamp. To add a new ticket, create `<next-id>.json`.
 
-**Via the server (optional):** `python .kanban/kanban_server.py` then use the API:
+**Via the server (optional):** `python .kanban/app/kanban_server.py` then use the API:
 
 | Action | Request |
 |---|---|
@@ -66,11 +81,24 @@ Both keys are optional and fall back per-field; a missing or malformed file is
 ignored. Precedence, most explicit first:
 
 - **host:** `KANBAN_HOST` env var → `server.json` → loopback default
-- **port:** `argv[1]` (`python kanban_server.py 9000`) → `KANBAN_PORT` env var →
+- **port:** `argv[1]` (`python app/kanban_server.py 9000`) → `KANBAN_PORT` env var →
   `server.json` → default
 
 Bind to loopback unless you deliberately need LAN exposure — the API exposes
 destructive endpoints (perf kill, server restart, DELETE task).
+
+### CPU cap
+
+On Windows the server assigns itself to a kernel Job Object with a hard CPU
+rate cap (`app/cpu_limiter.py`). The cap applies to the server process only —
+the orchestrator loop and perf sampler run as threads inside it and share the
+cap, but child processes (dispatched `claude` agents, git subprocesses) break
+away from the job at spawn (`JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK`) and run
+uncapped. Default 5% of total system CPU; resolved as `KANBAN_CPU_LIMIT` env
+> `server.json` `cpuLimitPercent` > default, `0` disables. Editable live from the
+**Setup** tab ("Server CPU cap") via `GET`/`PUT /api/server/config`, which persists
+`cpuLimitPercent` to `server.json` and re-applies the cap to the running Job Object
+(`cpu_limiter.set_cpu_limit`) without a restart.
 
 ---
 
@@ -215,7 +243,7 @@ tickets and dispatches headless `claude -p` sub-agents up to the concurrency cap
 logic lives in `orchestrator_core.py` (unit-tested); `orchestrator.py` is the runtime that
 spawns real processes.
 
-Run it: `python .kanban/orchestrator.py` (alongside `kanban_server.py`). You can also open a
+Run it: `python .kanban/app/orchestrator.py` (alongside `kanban_server.py`). You can also open a
 normal `claude` CLI in this workspace to talk to it — it reads the same files and the same
 triage prompt (`orchestrator_triage_prompt.md`).
 
@@ -313,8 +341,29 @@ UI shows a **Message agent** section on any in-progress ticket with a dispatched
   finishing; the next dispatch injects `pendingChat` into the agent's prompt as a
   "user guidance received mid-run" section and consumes the field. Blocked outcomes keep
   `pendingChat` for whenever the ticket is re-dispatched.
-- **Escape hatch:** `CHAT_ENABLED = False` in `orchestrator_core.py` restores the legacy
+- **Escape hatch:** `CHAT_ENABLED = False` in `app/orchestrator_core.py` restores the legacy
   argv-prompt dispatch (no stdin pipe/pump); the POST then returns 409.
+
+## Layrr live edit
+
+Per-board point-and-click editing: Project Settings holds a `layrr` block on
+`_meta.json` (`targetPort`, `projectRoot`, `baseBranch`, optional `model`) and a
+**Go live** button. The server (`app/layrr_launcher.py`) attaches the layrr
+overlay proxy to a dev server **already listening** on `targetPort` (it never
+starts the dev server itself), auto-allocating proxy ports from 4567. Each edit
+request submitted in the overlay becomes a ticket on that board (agent swap in
+`app/layrr/kanban-agent.mjs`, stamped with the board's default `model` when set);
+an injected widget (`static/layrr-widget.js`) shows those tickets' live status
+inside the proxied app. Endpoints: `POST /api/layrr/start/<board>`,
+`GET /api/layrr/status`, `POST /api/layrr/stop/<id>`. Instances persist in
+`_orchestrator/layrr.json` (logs in `_orchestrator/layrr-logs/`), survive server
+restarts via port-probe adoption, and several may be live at once — one topbar
+chip each. Three patches are re-applied to the resolved layrr install before
+every spawn (git-write guard, kanban sink, widget injection); the guard is kept
+byte-identical to b2-react's `dev:layrr` copy so shared installs don't fight.
+start() returns before the proxy answers (the single-threaded server would
+deadlock waiting — layrr's preflight calls back into `/api/files`); the UI polls
+status until the port opens.
 
 ## Performance tab
 

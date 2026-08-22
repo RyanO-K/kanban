@@ -44,7 +44,7 @@ def board(kanban, monkeypatch):
 
 
 def test_add_comment_preserves_concurrent_comment(board, monkeypatch):
-    p = os.path.join(board, "demo", "1.json")
+    p = os.path.join(board, "boards", "demo", "1.json")
     fired = {"done": False}
 
     def patched_now():
@@ -64,7 +64,7 @@ def test_add_comment_preserves_concurrent_comment(board, monkeypatch):
 
 
 def test_update_status_preserves_concurrent_comment(board, monkeypatch):
-    p = os.path.join(board, "demo", "1.json")
+    p = os.path.join(board, "boards", "demo", "1.json")
     fired = {"done": False}
 
     def patched_now():
@@ -98,7 +98,7 @@ def _inflight(path, pid=123):
 def test_running_tick_preserves_concurrent_comment(kanban, monkeypatch):
     """A 'running' agent's tick must NOT rewrite the ticket from the stale
     snapshot — a comment the sub-agent wrote mid-tick has to survive."""
-    p = os.path.join(kanban, "demo", "1.json")
+    p = os.path.join(kanban, "boards", "demo", "1.json")
     _inflight(p)
     oc.write_state(kanban, {"enabled": False, "concurrencyCap": 3,
                             "stopAllRequested": False})
@@ -118,7 +118,7 @@ def test_running_tick_preserves_concurrent_comment(kanban, monkeypatch):
 def test_completed_tick_preserves_concurrent_commit_gate(kanban, monkeypatch):
     """When reaping a completed agent, a commitGate/comment the sub-agent wrote
     after the tick snapshot must survive the orchestrator's status write."""
-    p = os.path.join(kanban, "demo", "1.json")
+    p = os.path.join(kanban, "boards", "demo", "1.json")
     _inflight(p)
     oc.write_state(kanban, {"enabled": False, "concurrencyCap": 3,
                             "stopAllRequested": False})

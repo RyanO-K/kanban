@@ -28,8 +28,8 @@ def test_tick_logs_block_timestamps_to_stdout(capsys, tmp_path):
     kanban_dir.mkdir()
 
     # Set up minimal board structure
-    board_dir = kanban_dir / "test-board"
-    board_dir.mkdir()
+    board_dir = kanban_dir / "boards" / "test-board"
+    board_dir.mkdir(parents=True)
 
     meta = {
         "project": "Test",

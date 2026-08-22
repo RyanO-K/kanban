@@ -21,6 +21,80 @@ META_FILE = "_meta.json"
 TICK_SECONDS = 60
 SKIP_DIRS = {"config", "_orchestrator", "__pycache__", "tests"}
 
+
+# --- SF org auth-URL population (ticket #98) ---------------------------------
+#
+# A module-level seam so tests can monkeypatch _sf_run without touching os.environ
+# or spawning real `sf` processes.
+
+def _sf_run(cmd, **kwargs):
+    """Run an `sf` CLI command and return a subprocess.CompletedProcess-like object."""
+    return subprocess.run(cmd, capture_output=True, text=True, **kwargs)
+
+
+def populate_sfdx_auth_urls():
+    """Enumerate all sf-authenticated orgs and set SFDX_AUTH_URL_<ALIAS> env vars.
+
+    1. Calls `sf org list --json` to get all orgs (nonScratchOrgs + sandboxes).
+    2. For each org with a non-empty alias, derives the var name via
+       oc.alias_to_env_var_name() and calls `sf org display --verbose` to get the
+       sfdxAuthUrl.
+    3. Sets the var in os.environ if not already present so it can be forwarded
+       via passthroughEnv on Docker dispatches.
+    4. Returns a summary dict: {found, populated, skipped: [...], failed: [...]}.
+
+    Entirely best-effort: sf not installed, non-zero exit, or malformed JSON all
+    produce an empty result rather than raising.
+    """
+    result = {"found": 0, "populated": 0, "skipped": [], "failed": []}
+    # Step 1: enumerate orgs.
+    try:
+        r = _sf_run(["sf", "org", "list", "--json"])
+    except OSError:
+        return result
+    if r.returncode != 0:
+        return result
+    try:
+        data = json.loads(r.stdout or "{}")
+        orgs_data = data.get("result") or {}
+        orgs = list(orgs_data.get("nonScratchOrgs") or [])
+        orgs += list(orgs_data.get("sandboxes") or [])
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        return result
+
+    # Filter to orgs with a usable alias.
+    aliased = [o for o in orgs if o.get("alias")]
+    result["found"] = len(aliased)
+
+    # Step 2-3: fetch and populate each.
+    for org in aliased:
+        alias = org["alias"]
+        var_name = oc.alias_to_env_var_name(alias)
+        # Don't overwrite a value the user already exported.
+        if os.environ.get(var_name):
+            result["skipped"].append(alias)
+            continue
+        try:
+            dr = _sf_run(["sf", "org", "display", "--verbose", "-o", alias, "--json"])
+        except OSError:
+            result["failed"].append(alias)
+            continue
+        if dr.returncode != 0:
+            result["failed"].append(alias)
+            continue
+        try:
+            dd = json.loads(dr.stdout or "{}")
+            auth_url = (dd.get("result") or {}).get("sfdxAuthUrl")
+        except (json.JSONDecodeError, AttributeError, TypeError):
+            auth_url = None
+        if not auth_url:
+            result["skipped"].append(alias)
+            continue
+        os.environ[var_name] = auth_url
+        result["populated"] += 1
+
+    return result
+
 # Registry of Popen objects for processes we spawned.
 # Maps pid (int) -> Popen so we can read real exit codes on reap.
 _PROCS = {}
@@ -42,7 +116,12 @@ _SERVER_OPS = {}
 
 def load_all_tasks(kanban_dir):
     tasks = []
-    for entry in sorted(os.scandir(kanban_dir), key=lambda e: e.name):
+    boards_dir = oc.boards_root(kanban_dir)
+    try:
+        entries = sorted(os.scandir(boards_dir), key=lambda e: e.name)
+    except FileNotFoundError:
+        entries = []
+    for entry in entries:
         if not entry.is_dir() or entry.name in SKIP_DIRS:
             continue
         if not os.path.isfile(os.path.join(entry.path, META_FILE)):
@@ -1053,7 +1132,8 @@ def _probe_fable_available(timeout=10):
     """
     try:
         result = _run_tracked(
-            ["claude", "--model", oc.FABLE_MODEL, "-p", "", "--max-tokens", "1"],
+            ["claude", "--model", oc.FABLE_MODEL, "-p", "", "--max-tokens", "1",
+             *oc.superpowers_args(oc.FABLE_MODEL, utility=True)],
             "Probing fable availability",
             capture_output=True, text=True, timeout=timeout,
         )
@@ -1161,6 +1241,7 @@ def _docker_dispatch(kanban_dir, board, task, board_meta, prompt, session_id,
                  "--output-format", "stream-json", "--verbose"]
     if model:
         inner += ["--model", model]
+    inner += oc.superpowers_args(model)
     if allowed:
         inner += ["--allowedTools", ",".join(allowed)]
     passthrough = _resolve_passthrough_env(board_meta, log_f)
@@ -1266,6 +1347,7 @@ def spawn_agent(kanban_dir, board, task, profile, model):
                    "--output-format", "stream-json", "--verbose"]
         if model:
             cmd += ["--model", model]
+        cmd += oc.superpowers_args(model)
         if allowed:
             cmd += ["--allowedTools", ",".join(allowed)]
 
@@ -1610,7 +1692,8 @@ def _summarize_progress(kanban_dir, task, reason):
     timeout = state.get("triageTimeoutSeconds") or 120
     label = f"Summarizing ticket #{task.get('id', '?')} ({reason})"
     try:
-        out = _run_tracked(["claude", "-p", prompt, "--model", model], label,
+        out = _run_tracked(["claude", "-p", prompt, "--model", model,
+                            *oc.superpowers_args(model, utility=True)], label,
                            capture_output=True, text=True, timeout=timeout)
         summary = (out.stdout or "").strip()
         if summary:
@@ -1819,6 +1902,8 @@ def tick(kanban_dir, *, opus_triage, summarize_progress=None, initial_triage=Non
             _finish_completion(kanban_dir, t)
             _add_history(t, t.get("status"), "completed")
             t["status"] = "completed"
+            # Clear any prior login-error flag — legitimate logs mean auth is working.
+            t.pop("loginError", None)
             oc.clear_marker(t)
             write_task(t["_path"], t)
             oc.append_activity(kanban_dir, {"ts": oc.now_iso(), "kind": "complete",
@@ -1837,7 +1922,7 @@ def tick(kanban_dir, *, opus_triage, summarize_progress=None, initial_triage=Non
             # and prints "usage limit reached|<reset-epoch>"). That isn't a real
             # failure and needs no human: re-queue the ticket and park dispatch
             # until the limit resets, when the tick loop resumes on its own.
-            limit = oc.parse_usage_limit(tail)
+            limit = oc.usage_limit_from_transcript_tail(tail)
             if limit is not None:
                 reset = limit.get("resetAt")
                 oc.set_usage_pause(kanban_dir, reset, now,
@@ -1854,6 +1939,16 @@ def tick(kanban_dir, *, opus_triage, summarize_progress=None, initial_triage=Non
                 oc.append_activity(kanban_dir, {
                     "ts": oc.now_iso(), "kind": "usage_limit", "board": t["_board"],
                     "ticket": t["id"], "pausedUntil": until})
+                continue
+            # A login error ("Not logged in" / "Please run /login") means the CLI
+            # has no valid auth — the agent cannot do real work. Record loginError
+            # on the ticket so the UI can surface it, and block for human action.
+            if oc.login_error_from_transcript_tail(tail):
+                t["loginError"] = True
+                _add_comment(t, "NEEDS HUMAN: agent is not logged in. "
+                                "Run `claude /login` or set ANTHROPIC_API_KEY, "
+                                "then re-queue this ticket.")
+                _finish_blocked(kanban_dir, t, "login_error")
                 continue
             _add_comment(t, "NEEDS HUMAN: agent exited unexpectedly. See the run log for details.")
             _finish_blocked(kanban_dir, t, "error")
@@ -1878,15 +1973,25 @@ def tick(kanban_dir, *, opus_triage, summarize_progress=None, initial_triage=Non
     for t in promotable:
         # Run initial triage (Sonnet) to fill in dependsOn and model before
         # the ticket enters the Ready queue. Failures are swallowed so a
-        # Sonnet outage never blocks promotion.
+        # Sonnet outage never blocks promotion of tickets that already have a model.
         try:
             triage = initial_triage(kanban_dir, t, tasks) or {}
         except Exception:
             triage = {}
-        if "dependsOn" in triage:
-            t["dependsOn"] = triage["dependsOn"]
-        if "model" in triage:
-            t["model"] = triage["model"]
+        # Merge triage without clobbering a user-pinned model/deps (ticket #108).
+        # A ticket enters `ready` only once it has a real model (ticket #100's
+        # invariant); if triage produced none, leave it in `todo` and log the
+        # failure so it is visible instead of silently stuck (ticket #108 — the
+        # no-model deadlock this fixes).
+        if not oc.apply_initial_triage(t, triage):
+            write_task(t["_path"], t)
+            oc.append_activity(kanban_dir, {
+                "ts": oc.now_iso(), "kind": "triage_no_model",
+                "board": t["_board"], "ticket": t["id"],
+                "message": ("initial triage assigned no model; leaving ticket in "
+                            "todo. Set a model via the ticket picklist or retry."),
+            })
+            continue
         _add_history(t, t.get("status"), "ready")
         t["status"] = "ready"
         write_task(t["_path"], t)
@@ -2081,7 +2186,8 @@ def _real_sonnet_triage(kanban_dir, task, all_tasks, model=None, timeout=60):
     label = f"Assigning model for ticket #{task.get('id', '?')}"
     try:
         out = _run_tracked(
-            ["claude", "-p", prompt, "--model", model], label,
+            ["claude", "-p", prompt, "--model", model,
+             *oc.superpowers_args(model, utility=True)], label,
             capture_output=True, text=True, timeout=timeout,
         )
         text = (out.stdout or "").strip()
@@ -2107,7 +2213,8 @@ def _real_opus_triage(prompt, eligible, profiles, free, model=None, timeout=120)
     ids = ", ".join(str(t["id"]) for t in eligible[:5])
     label = f"Triage: dispatching tickets [{ids}]"
     try:
-        out = _run_tracked(["claude", "-p", full, "--model", model], label,
+        out = _run_tracked(["claude", "-p", full, "--model", model,
+                            *oc.superpowers_args(model, utility=True)], label,
                            capture_output=True, text=True, timeout=timeout)
         text = (out.stdout or "").strip()
         start, end = text.find("{"), text.rfind("}")
@@ -2159,6 +2266,18 @@ def run_loop(kanban_dir=None, *, stop_event=None, tick_seconds=TICK_SECONDS,
         })
         return
     try:
+        # Populate SFDX_AUTH_URL_<ALIAS> env vars before the first tick (ticket #98)
+        # so passthroughEnv on useDocker boards can forward them into containers.
+        sf_result = populate_sfdx_auth_urls()
+        oc.append_activity(kanban_dir, {
+            "ts": oc.now_iso(), "kind": "info",
+            "message": (
+                f"SF auth URLs: {sf_result['found']} org(s) found, "
+                f"{sf_result['populated']} populated"
+                + (f", skipped {sf_result['skipped']}" if sf_result.get("skipped") else "")
+                + (f", failed {sf_result['failed']}" if sf_result.get("failed") else "")
+            ),
+        })
         while stop_event is None or not stop_event.is_set():
             try:
                 tick(kanban_dir, opus_triage=opus_triage)

@@ -37,14 +37,14 @@ def test_tick_enabled_dispatches_eligible(kanban, monkeypatch):
     orch.tick(kanban, opus_triage=lambda prompt, elig, profs, free: {"dispatch": [
         {"ticket": "1", "profile": "frontend", "model": "m", "reason": "x"}]})
 
-    t1 = _read(os.path.join(kanban, "demo", "1.json"))
+    t1 = _read(os.path.join(kanban, "boards", "demo", "1.json"))
     assert t1["status"] == "in_progress"
     assert t1["orchestrator"]["pid"] == 4242
 
 
 def test_tick_respects_concurrency_cap(kanban, monkeypatch):
     # Ticket 1 already in-flight; cap is 1 → no new dispatch.
-    p = os.path.join(kanban, "demo", "1.json")
+    p = os.path.join(kanban, "boards", "demo", "1.json")
     t = _read(p)
     t["status"] = "in_progress"
     t["orchestrator"] = {"state": "dispatched", "pid": 1, "killRequested": False}
@@ -61,7 +61,7 @@ def test_tick_respects_concurrency_cap(kanban, monkeypatch):
 
 
 def test_tick_stop_all_kills(kanban, monkeypatch):
-    p = os.path.join(kanban, "demo", "1.json")
+    p = os.path.join(kanban, "boards", "demo", "1.json")
     t = _read(p)
     t["status"] = "in_progress"
     t["orchestrator"] = {"state": "dispatched", "pid": 777, "killRequested": False}
@@ -86,7 +86,7 @@ def test_tick_stop_all_kills(kanban, monkeypatch):
 def test_tick_max_agent_seconds_stalls_alive_agent(kanban, monkeypatch):
     """When state.maxAgentSeconds is set, an alive agent past that wall-clock cap
     is reaped as stalled even if its log is still growing."""
-    p = os.path.join(kanban, "demo", "1.json")
+    p = os.path.join(kanban, "boards", "demo", "1.json")
     t = _read(p)
     t["status"] = "in_progress"
     # dispatchedAt far in the past so any cap in seconds will trigger
@@ -122,8 +122,8 @@ def test_tick_promotes_todo_with_met_deps_to_ready(kanban, monkeypatch):
 
     orch.tick(kanban, opus_triage=lambda *a, **k: {"dispatch": []})
 
-    t1 = _read(os.path.join(kanban, "demo", "1.json"))
-    t2 = _read(os.path.join(kanban, "demo", "2.json"))
+    t1 = _read(os.path.join(kanban, "boards", "demo", "1.json"))
+    t2 = _read(os.path.join(kanban, "boards", "demo", "2.json"))
     assert t1["status"] == "ready", f"ticket 1 should be promoted, got {t1['status']}"
     assert t2["status"] == "todo", f"ticket 2 dep unmet, should stay todo, got {t2['status']}"
     # History records the promotion.
@@ -138,7 +138,7 @@ def test_tick_promotion_runs_even_when_disabled(kanban, monkeypatch):
     enabled flag (dispatch is what's gated by enabled, not promotion)."""
     oc.write_state(kanban, {"enabled": False, "concurrencyCap": 3, "stopAllRequested": False})
     orch.tick(kanban, opus_triage=lambda *a, **k: {"dispatch": []})
-    assert _read(os.path.join(kanban, "demo", "1.json"))["status"] == "ready"
+    assert _read(os.path.join(kanban, "boards", "demo", "1.json"))["status"] == "ready"
 
 
 def test_tick_promotes_then_dispatches_from_ready(kanban, monkeypatch):
@@ -166,7 +166,7 @@ def test_tick_promotes_then_dispatches_from_ready(kanban, monkeypatch):
     assert "1" in seen_eligible
     # Ticket 2 (dep unmet) was never offered.
     assert "2" not in seen_eligible
-    t1 = _read(os.path.join(kanban, "demo", "1.json"))
+    t1 = _read(os.path.join(kanban, "boards", "demo", "1.json"))
     assert t1["status"] == "in_progress"
     assert t1["orchestrator"]["pid"] == 4242
 
@@ -175,7 +175,7 @@ def test_tick_promotes_then_dispatches_from_ready(kanban, monkeypatch):
 
 def _set_dispatched(kanban, ticket_id, pid, dispatched_at=None):
     """Helper: put a ticket into dispatched state with a marker."""
-    p = os.path.join(kanban, "demo", f"{ticket_id}.json")
+    p = os.path.join(kanban, "boards", "demo", f"{ticket_id}.json")
     t = _read(p)
     t["status"] = "in_progress"
     t["orchestrator"] = {
@@ -317,7 +317,7 @@ def test_spawn_agent_uses_valid_cwd(kanban, monkeypatch):
     monkeypatch.setattr(oc, "CHAT_DIR", os.path.join(kanban, "_orchestrator", "chat"))
 
     task = {"id": "1", "title": "x", "detail": "", "_board": "demo",
-            "_path": os.path.join(kanban, "demo", "1.json")}
+            "_path": os.path.join(kanban, "boards", "demo", "1.json")}
     profile = {"name": "general", "systemPrompt": "p", "model": "m"}
 
     # Pass a RELATIVE kanban dir — this is what triggered the empty-string cwd.
@@ -376,7 +376,7 @@ def test_tick_adopted_dead_with_question_needs_human(kanban, monkeypatch):
 
 def _write_log(kanban, ticket_id, text):
     """Write the agent run-log that the ticket's marker logFile points at."""
-    p = os.path.join(kanban, "demo", f"{ticket_id}.json")
+    p = os.path.join(kanban, "boards", "demo", f"{ticket_id}.json")
     t = _read(p)
     log_rel = t["orchestrator"]["logFile"]  # e.g. .kanban/_orchestrator/runs/fake.log
     # logFile is repo-relative (.kanban/...); the loop reads it as kanban_dir/../<logFile>.
@@ -588,7 +588,7 @@ def test_spawn_agent_sets_resumable_session_id(kanban, monkeypatch):
     monkeypatch.setattr(oc, "CHAT_DIR", os.path.join(kanban, "_orchestrator", "chat"))
 
     task = {"id": "1", "title": "x", "detail": "", "_board": "demo",
-            "_path": os.path.join(kanban, "demo", "1.json")}
+            "_path": os.path.join(kanban, "boards", "demo", "1.json")}
     profile = {"name": "general", "systemPrompt": "p", "model": "m"}
 
     marker = orch.spawn_agent(kanban, "demo", task, profile, "m")
@@ -622,7 +622,7 @@ def test_tick_dispatch_records_claude_session_id(kanban, monkeypatch):
     orch.tick(kanban, opus_triage=lambda prompt, elig, profs, free: {"dispatch": [
         {"ticket": "1", "profile": "frontend", "model": "m", "reason": "x"}]})
 
-    t1 = _read(os.path.join(kanban, "demo", "1.json"))
+    t1 = _read(os.path.join(kanban, "boards", "demo", "1.json"))
     assert t1.get("claudeSessionId") == "abc-123-session", (
         f"dispatch must record claudeSessionId, got {t1.get('claudeSessionId')!r}"
     )
@@ -656,7 +656,7 @@ def test_spawn_agent_resumes_prior_session_on_unblock(kanban, monkeypatch):
     monkeypatch.setattr(oc, "CHAT_DIR", os.path.join(kanban, "_orchestrator", "chat"))
 
     task = {"id": "1", "title": "x", "detail": "the detail", "_board": "demo",
-            "_path": os.path.join(kanban, "demo", "1.json"),
+            "_path": os.path.join(kanban, "boards", "demo", "1.json"),
             "status": "blocked", "claudeSessionId": "prior-sess",
             "orchestrator": {"state": "blocked",
                              "question": {"id": "q1", "prompt": "which option?",
@@ -702,7 +702,7 @@ def test_spawn_agent_fresh_dispatch_still_mints_session(kanban, monkeypatch):
     monkeypatch.setattr(oc, "CHAT_DIR", os.path.join(kanban, "_orchestrator", "chat"))
 
     task = {"id": "1", "title": "x", "detail": "", "_board": "demo",
-            "_path": os.path.join(kanban, "demo", "1.json")}
+            "_path": os.path.join(kanban, "boards", "demo", "1.json")}
     profile = {"name": "general", "systemPrompt": "p", "model": "m"}
 
     marker = orch.spawn_agent(kanban, "demo", task, profile, "m")
@@ -754,7 +754,7 @@ def test_spawn_agent_returns_cwd_in_marker(kanban, monkeypatch):
     monkeypatch.setattr(oc, "CHAT_DIR", os.path.join(kanban, "_orchestrator", "chat"))
 
     task = {"id": "1", "title": "x", "detail": "", "_board": "demo",
-            "_path": os.path.join(kanban, "demo", "1.json")}
+            "_path": os.path.join(kanban, "boards", "demo", "1.json")}
     profile = {"name": "general", "systemPrompt": "p", "model": "m"}
 
     marker = orch.spawn_agent(kanban, "demo", task, profile, "m")
@@ -781,7 +781,7 @@ def test_tick_dispatch_records_claude_session_dir(kanban, monkeypatch):
     orch.tick(kanban, opus_triage=lambda prompt, elig, profs, free: {"dispatch": [
         {"ticket": "1", "profile": "frontend", "model": "m", "reason": "x"}]})
 
-    t1 = _read(os.path.join(kanban, "demo", "1.json"))
+    t1 = _read(os.path.join(kanban, "boards", "demo", "1.json"))
     assert t1.get("claudeSessionDir") == "/workspace/root", (
         f"dispatch must record claudeSessionDir, got {t1.get('claudeSessionDir')!r}"
     )
@@ -840,7 +840,7 @@ def test_spawn_agent_uses_stream_json(kanban, monkeypatch):
     monkeypatch.setattr(orch, "_start_chat_pump", lambda *a, **k: None)
     monkeypatch.setattr(oc, "CHAT_DIR", os.path.join(kanban, "_orchestrator", "chat"))
     task = {"id": "1", "title": "x", "detail": "", "_board": "demo",
-            "_path": os.path.join(kanban, "demo", "1.json")}
+            "_path": os.path.join(kanban, "boards", "demo", "1.json")}
     orch.spawn_agent(kanban, "demo", task, {"name": "g", "systemPrompt": "p"}, "m")
     cmd = captured["cmd"]
     assert "--output-format" in cmd and "stream-json" in cmd
@@ -1024,7 +1024,7 @@ def test_publish_output_branch_is_best_effort_without_git(kanban, monkeypatch):
     monkeypatch.setattr(orch, "_run_git", boom)
 
     task = {"id": "1", "title": "First", "_board": "demo",
-            "_path": os.path.join(kanban, "demo", "1.json")}
+            "_path": os.path.join(kanban, "boards", "demo", "1.json")}
     result = orch.publish_output_branch(kanban, task, "ticket/1-first")
     assert result["pushed"] is False
     assert result["detail"]  # non-empty explanation
@@ -1051,7 +1051,7 @@ def test_publish_output_branch_bases_branch_on_default_branch(kanban, monkeypatc
     monkeypatch.setattr(orch, "_run_git", fake_git)
 
     task = {"id": "1", "title": "First", "_board": "demo",
-            "_path": os.path.join(kanban, "demo", "1.json")}
+            "_path": os.path.join(kanban, "boards", "demo", "1.json")}
     result = orch.publish_output_branch(kanban, task, "ticket/1-first")
 
     assert result["pushed"] is True
@@ -1081,7 +1081,7 @@ def test_publish_output_branch_falls_back_when_no_origin_head(kanban, monkeypatc
     monkeypatch.setattr(orch, "_run_git", fake_git)
 
     task = {"id": "1", "title": "First", "_board": "demo",
-            "_path": os.path.join(kanban, "demo", "1.json")}
+            "_path": os.path.join(kanban, "boards", "demo", "1.json")}
     result = orch.publish_output_branch(kanban, task, "ticket/1-first")
     # Whatever base it picks, it must complete (best-effort) without raising.
     assert result["pushed"] is True
@@ -1090,7 +1090,7 @@ def test_publish_output_branch_falls_back_when_no_origin_head(kanban, monkeypatc
 def test_tick_backfills_to_cap(kanban, monkeypatch):
     """Triage names one ticket but two slots are free -> backfill dispatches both."""
     for tid in ("1", "2"):
-        pp = os.path.join(kanban, "demo", f"{tid}.json")
+        pp = os.path.join(kanban, "boards", "demo", f"{tid}.json")
         tt = _read(pp)
         tt["status"] = "ready"
         tt.pop("dependsOn", None)
@@ -1186,7 +1186,7 @@ def test_run_loop_acquires_lock_ticks_and_releases(kanban, monkeypatch):
 # --- #52: dispatch keys by (board, id) so same-id tickets on two boards collide ---
 
 def _add_board(kanban, board, ticket_id, **fields):
-    bdir = os.path.join(kanban, board)
+    bdir = os.path.join(kanban, "boards", board)
     os.makedirs(bdir, exist_ok=True)
     with open(os.path.join(bdir, "_meta.json"), "w", encoding="utf-8") as f:
         json.dump({"project": board}, f)
@@ -1413,7 +1413,7 @@ def test_tick_resumes_after_pause_expires(kanban, monkeypatch):
     orch.tick(kanban, opus_triage=lambda prompt, elig, profs, free: {"dispatch": [
         {"ticket": "1", "profile": "frontend", "model": "m", "reason": "x"}]})
 
-    assert _read(os.path.join(kanban, "demo", "1.json"))["status"] == "in_progress"
+    assert _read(os.path.join(kanban, "boards", "demo", "1.json"))["status"] == "in_progress"
     assert oc.read_usage_pause(kanban) == {}, "expired pause should be cleared"
     kinds = [e.get("kind") for e in oc.read_activity(kanban)]
     assert "usage_resume" in kinds, f"expected a 'usage_resume' activity, got {kinds}"
@@ -1486,13 +1486,18 @@ def test_tick_promotion_calls_initial_triage(kanban, monkeypatch):
 
 
 def test_tick_promotion_writes_triage_result_to_ticket(kanban, monkeypatch):
-    """The result of initial_triage (dependsOn + model) must be written to the
-    ticket file before it is marked ready.
-
-    RED against current code: the promotion loop never calls initial_triage and
-    never writes model/dependsOn to the ticket."""
+    """The result of initial_triage (model) must be written to a ticket that has
+    no model of its own before it is marked ready. (Ticket #108: triage only fills
+    a model when one is absent — see test_tick_promotion_preserves_pinned_model for
+    the not-overwrite case.)"""
     oc.write_state(kanban, {"enabled": False, "concurrencyCap": 3,
                             "stopAllRequested": False})
+    # Strip ticket 1's pinned model so triage is the one that supplies it.
+    p = os.path.join(kanban, "boards", "demo", "1.json")
+    t = _read(p)
+    t.pop("model", None)
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(t, f)
 
     def fake_initial_triage(kanban_dir, task, all_tasks):
         return {"dependsOn": [], "model": "claude-haiku-4-5-20251001"}
@@ -1500,10 +1505,11 @@ def test_tick_promotion_writes_triage_result_to_ticket(kanban, monkeypatch):
     orch.tick(kanban, opus_triage=lambda *a, **k: {"dispatch": []},
               initial_triage=fake_initial_triage)
 
-    t1 = _read(os.path.join(kanban, "demo", "1.json"))
+    t1 = _read(p)
     assert t1.get("model") == "claude-haiku-4-5-20251001", (
         f"model from triage must be written to the ticket, got {t1.get('model')!r}"
     )
+    assert t1["status"] == "ready"
 
 
 def test_tick_promotion_triage_sets_depends_on(kanban, monkeypatch):
@@ -1520,10 +1526,81 @@ def test_tick_promotion_triage_sets_depends_on(kanban, monkeypatch):
     orch.tick(kanban, opus_triage=lambda *a, **k: {"dispatch": []},
               initial_triage=fake_initial_triage)
 
-    t1 = _read(os.path.join(kanban, "demo", "1.json"))
+    t1 = _read(os.path.join(kanban, "boards", "demo", "1.json"))
     assert t1.get("dependsOn") == ["99"], (
         f"dependsOn from triage must be written to the ticket, got {t1.get('dependsOn')!r}"
     )
+
+
+# --- Ticket #108: no-model todo tickets must reach initial triage ---
+
+def _write_ticket(kanban, ticket):
+    p = os.path.join(kanban, "boards", "demo", f"{ticket['id']}.json")
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(ticket, f)
+    return p
+
+
+def test_tick_no_model_ticket_gets_model_from_triage_and_promotes(kanban, monkeypatch):
+    """Ticket #108: a todo ticket with NO model reaches initial triage, gets a
+    model assigned, and is then promoted to ready — closing the deadlock where a
+    no-model ticket never reached the step that assigns its model."""
+    p = _write_ticket(kanban, {"id": "5", "title": "No model", "status": "todo"})
+    oc.write_state(kanban, {"enabled": False, "concurrencyCap": 3,
+                            "stopAllRequested": False})
+
+    def fake_initial_triage(kanban_dir, task, all_tasks):
+        return {"model": "claude-sonnet-4-6"}
+
+    orch.tick(kanban, opus_triage=lambda *a, **k: {"dispatch": []},
+              initial_triage=fake_initial_triage)
+
+    t5 = _read(p)
+    assert t5.get("model") == "claude-sonnet-4-6"
+    assert t5["status"] == "ready"
+
+
+def test_tick_no_model_ticket_triage_no_model_stays_todo(kanban, monkeypatch):
+    """Ticket #108: if triage assigns no model, the no-model ticket must NOT enter
+    ready (ticket #100 invariant). It stays in todo and an activity entry records
+    the failure so it is visible instead of silently stuck."""
+    p = _write_ticket(kanban, {"id": "5", "title": "No model", "status": "todo"})
+    oc.write_state(kanban, {"enabled": False, "concurrencyCap": 3,
+                            "stopAllRequested": False})
+
+    def fake_initial_triage(kanban_dir, task, all_tasks):
+        return {}  # triage could not produce a model
+
+    orch.tick(kanban, opus_triage=lambda *a, **k: {"dispatch": []},
+              initial_triage=fake_initial_triage)
+
+    t5 = _read(p)
+    assert t5["status"] == "todo", (
+        f"a no-model ticket must stay todo, got {t5['status']!r}")
+    assert not (t5.get("model") or "").strip()
+    acts = oc.read_activity(kanban)
+    assert any(a.get("kind") == "triage_no_model" and str(a.get("ticket")) == "5"
+               for a in acts), (
+        f"expected a triage_no_model activity entry for ticket 5, got {acts}")
+
+
+def test_tick_promotion_preserves_pinned_model(kanban, monkeypatch):
+    """Ticket #108: triage must never overwrite a user-pinned model. Ticket 1
+    carries a pinned model; triage suggests a different one; the pin wins and the
+    ticket still promotes."""
+    oc.write_state(kanban, {"enabled": False, "concurrencyCap": 3,
+                            "stopAllRequested": False})
+
+    def fake_initial_triage(kanban_dir, task, all_tasks):
+        return {"model": "claude-haiku-4-5-20251001"}
+
+    orch.tick(kanban, opus_triage=lambda *a, **k: {"dispatch": []},
+              initial_triage=fake_initial_triage)
+
+    t1 = _read(os.path.join(kanban, "boards", "demo", "1.json"))
+    assert t1.get("model") == "claude-opus-4-8", (
+        f"pinned model must be preserved, got {t1.get('model')!r}")
+    assert t1["status"] == "ready"
 
 
 def test_tick_promotion_triage_failure_still_promotes(kanban, monkeypatch):
@@ -1540,7 +1617,7 @@ def test_tick_promotion_triage_failure_still_promotes(kanban, monkeypatch):
     orch.tick(kanban, opus_triage=lambda *a, **k: {"dispatch": []},
               initial_triage=boom_triage)
 
-    t1 = _read(os.path.join(kanban, "demo", "1.json"))
+    t1 = _read(os.path.join(kanban, "boards", "demo", "1.json"))
     assert t1["status"] == "ready", (
         f"triage failure must not block promotion to ready, got {t1['status']!r}"
     )
@@ -1560,7 +1637,7 @@ def test_tick_promotion_no_initial_triage_arg_still_works(kanban, monkeypatch):
 
     orch.tick(kanban, opus_triage=lambda *a, **k: {"dispatch": []})
 
-    t1 = _read(os.path.join(kanban, "demo", "1.json"))
+    t1 = _read(os.path.join(kanban, "boards", "demo", "1.json"))
     assert t1["status"] == "ready", (
         f"promotion must still work when initial_triage is not supplied, "
         f"got {t1['status']!r}"
@@ -1584,7 +1661,7 @@ def test_real_sonnet_triage_calls_sonnet_with_ticket_context(kanban, monkeypatch
     monkeypatch.setattr(orch, "_run_tracked", fake_run_tracked)
 
     task = {"id": "1", "title": "Build login page", "detail": "OAuth flow",
-            "_board": "demo", "_path": os.path.join(kanban, "demo", "1.json")}
+            "_board": "demo", "_path": os.path.join(kanban, "boards", "demo", "1.json")}
     all_tasks = [task]
 
     result = orch._real_sonnet_triage(kanban, task, all_tasks)
@@ -1619,7 +1696,7 @@ def test_sonnet_triage_includes_fable_in_model_choices(kanban, monkeypatch):
     monkeypatch.setattr(orch, "_run_tracked", fake_run_tracked)
 
     task = {"id": "1", "title": "Complex creative task", "detail": "Needs Fable",
-            "_board": "demo", "_path": os.path.join(kanban, "demo", "1.json")}
+            "_board": "demo", "_path": os.path.join(kanban, "boards", "demo", "1.json")}
     result = orch._real_sonnet_triage(kanban, task, [task])
 
     prompt_arg = captured["cmd"][2]
@@ -1674,7 +1751,7 @@ def test_spawn_agent_uses_fable_when_available(kanban, monkeypatch):
     monkeypatch.setattr(oc, "CHAT_DIR", os.path.join(kanban, "_orchestrator", "chat"))
     oc.write_profile(kanban, {"name": "backend", "whenToUse": "x"})
     task = {"id": "1", "title": "T", "_board": "demo",
-            "_path": os.path.join(kanban, "demo", "1.json")}
+            "_path": os.path.join(kanban, "boards", "demo", "1.json")}
     profile = {"name": "backend", "systemPrompt": "x"}
     orch.spawn_agent(kanban, "demo", task, profile, "claude-fable-5")
 
@@ -1708,7 +1785,7 @@ def test_spawn_agent_falls_back_to_opus_when_fable_unavailable(kanban, monkeypat
     monkeypatch.setattr(oc, "CHAT_DIR", os.path.join(kanban, "_orchestrator", "chat"))
     oc.write_profile(kanban, {"name": "backend", "whenToUse": "x"})
     task = {"id": "1", "title": "T", "_board": "demo",
-            "_path": os.path.join(kanban, "demo", "1.json")}
+            "_path": os.path.join(kanban, "boards", "demo", "1.json")}
     profile = {"name": "backend", "systemPrompt": "x"}
     orch.spawn_agent(kanban, "demo", task, profile, "claude-fable-5")
 
@@ -1851,7 +1928,7 @@ def test_task_log_uses_completed_log_when_done(monkeypatch, tmp_path):
     no fallback to completedLog on a done ticket."""
     import kanban_server as ks
     kanban = tmp_path / ".kanban"
-    board = kanban / "demo"
+    board = kanban / "boards" / "demo"
     runs = kanban / "_orchestrator" / "runs"
     board.mkdir(parents=True)
     runs.mkdir(parents=True)
@@ -1937,4 +2014,101 @@ def test_summarize_progress_fallback_has_no_log_tail(kanban, monkeypatch):
     )
     assert "step X done" not in fallback, (
         "raw log tail must NOT be in the fallback"
+    )
+
+
+# --- Ticket #95: login error handler ---
+
+def test_tick_login_error_blocks_ticket(kanban, monkeypatch):
+    """When a crashed agent's log contains 'Not logged in', the ticket is blocked
+    with loginError=True rather than a generic 'error' block."""
+    pid = 6161
+    p = _set_dispatched(kanban, "1", pid)
+    _write_log(kanban, "1", "Error: Not logged in")
+    oc.write_state(kanban, {"enabled": False, "concurrencyCap": 3,
+                            "stopAllRequested": False})
+
+    monkeypatch.setattr(orch, "_process_alive", lambda _pid: False)
+    monkeypatch.setattr(orch, "_exit_code", lambda _pid: 1)
+
+    orch.tick(kanban, opus_triage=lambda *a, **k: {"dispatch": []})
+
+    t1 = _read(p)
+    assert t1["status"] == "blocked", (
+        f"login-errored ticket should be blocked, got '{t1['status']}'"
+    )
+    assert t1.get("loginError") is True, (
+        f"loginError flag should be set to True, got {t1.get('loginError')!r}"
+    )
+    kinds = [e.get("kind") for e in oc.read_activity(kanban)]
+    assert "login_error" in kinds, f"expected a 'login_error' activity, got {kinds}"
+
+
+def test_tick_login_error_please_run_login(kanban, monkeypatch):
+    """'Please run /login' in the log also triggers the login error handler."""
+    pid = 6162
+    p = _set_dispatched(kanban, "1", pid)
+    _write_log(kanban, "1", "Please run /login to continue")
+    oc.write_state(kanban, {"enabled": False, "concurrencyCap": 3,
+                            "stopAllRequested": False})
+
+    monkeypatch.setattr(orch, "_process_alive", lambda _pid: False)
+    monkeypatch.setattr(orch, "_exit_code", lambda _pid: 1)
+
+    orch.tick(kanban, opus_triage=lambda *a, **k: {"dispatch": []})
+
+    t1 = _read(p)
+    assert t1["status"] == "blocked"
+    assert t1.get("loginError") is True
+
+
+def test_tick_login_error_cleared_on_completion(kanban, monkeypatch):
+    """When a previously login-errored ticket later completes successfully,
+    loginError is cleared from the ticket."""
+    pid = 6163
+    p = _set_dispatched(kanban, "1", pid)
+    oc.write_state(kanban, {"enabled": False, "concurrencyCap": 3,
+                            "stopAllRequested": False})
+
+    # Pre-set loginError on the ticket (as if a previous run set it).
+    t = _read(p)
+    t["loginError"] = True
+    # Add a Claude comment so adopted-path agent_left_signal returns "progress".
+    t.setdefault("comments", []).append(
+        {"writer": "Claude", "message": "Done!", "timestamp": oc.now_iso()}
+    )
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(t, f)
+
+    monkeypatch.setattr(orch, "_process_alive", lambda _pid: False)
+    monkeypatch.setattr(orch, "_exit_code", lambda _pid: 0)
+    monkeypatch.setattr(orch, "_finish_completion", lambda *a, **k: None)
+    monkeypatch.setattr(orch, "_save_completed_log", lambda *a, **k: None)
+
+    orch.tick(kanban, opus_triage=lambda *a, **k: {"dispatch": []})
+
+    t1 = _read(p)
+    assert t1["status"] == "completed"
+    assert "loginError" not in t1, (
+        f"loginError should be cleared on completion, got {t1.get('loginError')!r}"
+    )
+
+
+def test_tick_login_error_not_set_for_normal_crash(kanban, monkeypatch):
+    """A normal crash (not a login error) does NOT set loginError on the ticket."""
+    pid = 6164
+    p = _set_dispatched(kanban, "1", pid)
+    _write_log(kanban, "1", "Something else went wrong entirely")
+    oc.write_state(kanban, {"enabled": False, "concurrencyCap": 3,
+                            "stopAllRequested": False})
+
+    monkeypatch.setattr(orch, "_process_alive", lambda _pid: False)
+    monkeypatch.setattr(orch, "_exit_code", lambda _pid: 1)
+
+    orch.tick(kanban, opus_triage=lambda *a, **k: {"dispatch": []})
+
+    t1 = _read(p)
+    assert t1["status"] == "blocked"
+    assert "loginError" not in t1, (
+        f"loginError should not be set for a normal crash, got {t1.get('loginError')!r}"
     )

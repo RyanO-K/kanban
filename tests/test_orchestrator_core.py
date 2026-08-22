@@ -246,7 +246,7 @@ def test_no_resume_when_not_unblocked():
 
 def test_promotable_todo_with_no_deps():
     """A todo ticket with no dependencies is promotable to ready."""
-    tasks = [{"id": "1", "status": "todo"}]
+    tasks = [{"id": "1", "status": "todo", "model": "claude-opus-4-8"}]
     assert [t["id"] for t in oc.promotable_tickets(tasks)] == ["1"]
 
 
@@ -254,7 +254,7 @@ def test_promotable_todo_with_met_deps():
     """A todo ticket whose deps are all completed is promotable to ready."""
     tasks = [
         {"id": "1", "status": "completed"},
-        {"id": "2", "status": "todo", "dependsOn": ["1"]},
+        {"id": "2", "status": "todo", "dependsOn": ["1"], "model": "claude-opus-4-8"},
     ]
     assert [t["id"] for t in oc.promotable_tickets(tasks)] == ["2"]
 
@@ -262,8 +262,8 @@ def test_promotable_todo_with_met_deps():
 def test_not_promotable_todo_with_unmet_deps():
     """A todo ticket with an incomplete dependency is NOT promotable."""
     tasks = [
-        {"id": "1", "status": "todo"},
-        {"id": "2", "status": "todo", "dependsOn": ["1"]},
+        {"id": "1", "status": "todo", "model": "claude-opus-4-8"},
+        {"id": "2", "status": "todo", "dependsOn": ["1"], "model": "claude-opus-4-8"},
     ]
     assert [t["id"] for t in oc.promotable_tickets(tasks)] == ["1"]
 
@@ -289,12 +289,64 @@ def test_promotable_deps_resolved_per_board():
     """Promotion respects per-board dependency scoping like eligibility does."""
     tasks = [
         {"_board": "A", "id": "1", "status": "completed"},
-        {"_board": "B", "id": "1", "status": "todo"},
-        {"_board": "B", "id": "2", "status": "todo", "dependsOn": ["1"]},
+        {"_board": "B", "id": "1", "status": "todo", "model": "claude-opus-4-8"},
+        {"_board": "B", "id": "2", "status": "todo", "dependsOn": ["1"], "model": "claude-opus-4-8"},
     ]
     promo = {(t["_board"], t["id"]) for t in oc.promotable_tickets(tasks)}
     assert ("B", "2") not in promo  # its dep (B,1) is still todo
     assert ("B", "1") in promo
+
+
+def test_promotable_todo_without_model_is_eligible_for_triage():
+    """Ticket #108: a no-model todo ticket (deps met) IS promotable so it reaches
+    initial triage — that is the step that assigns the model. Filtering it out here
+    (as ticket #100 did) left it stuck in todo forever (the deadlock). The model
+    gate now lives in the promotion step (`apply_initial_triage`), not here."""
+    tasks = [
+        {"id": "1", "status": "todo", "model": "claude-opus-4-8"},
+        {"id": "2", "status": "todo"},  # no model
+        {"id": "3", "status": "todo", "model": ""},  # empty model
+        {"id": "4", "status": "todo", "model": "  "},  # whitespace only
+    ]
+    promo_ids = sorted(t["id"] for t in oc.promotable_tickets(tasks))
+    assert promo_ids == ["1", "2", "3", "4"]
+
+
+def test_apply_initial_triage_assigns_model_when_missing():
+    """Triage's model fills a no-model ticket, making it ready-eligible (True)."""
+    t = {"id": "2", "status": "todo"}
+    assert oc.apply_initial_triage(t, {"model": "claude-sonnet-4-6"}) is True
+    assert t["model"] == "claude-sonnet-4-6"
+
+
+def test_apply_initial_triage_never_overwrites_pinned_model():
+    """A user-pinned model wins: triage must not replace an existing model
+    (ticket #108). Still ready-eligible since a real model is present."""
+    t = {"id": "1", "status": "todo", "model": "claude-opus-4-8"}
+    assert oc.apply_initial_triage(t, {"model": "claude-sonnet-4-6"}) is True
+    assert t["model"] == "claude-opus-4-8"
+
+
+def test_apply_initial_triage_no_model_stays_in_todo():
+    """If triage yields no usable model, the ticket is NOT ready-eligible (False)
+    and gains no model — preserving ticket #100's invariant that nothing enters
+    ready without a model."""
+    t = {"id": "2", "status": "todo"}
+    assert oc.apply_initial_triage(t, {}) is False
+    assert oc.apply_initial_triage(t, {"model": "  "}) is False
+    assert not (t.get("model") or "").strip()
+
+
+def test_apply_initial_triage_fills_depends_on_only_when_absent():
+    """Triage fills dependsOn when the ticket has none, but never clobbers deps
+    the user already set."""
+    fresh = {"id": "2", "status": "todo", "model": "m"}
+    oc.apply_initial_triage(fresh, {"dependsOn": ["9"]})
+    assert fresh["dependsOn"] == ["9"]
+
+    pinned = {"id": "3", "status": "todo", "model": "m", "dependsOn": ["1"]}
+    oc.apply_initial_triage(pinned, {"dependsOn": ["9"]})
+    assert pinned["dependsOn"] == ["1"]
 
 
 def test_eligible_dispatches_from_ready_not_todo():
@@ -379,7 +431,7 @@ def test_promotable_string_dep_completed():
     """dependsOn given as a plain string is treated as a single dependency."""
     tasks = [
         {"id": "1", "status": "completed"},
-        {"id": "2", "status": "todo", "dependsOn": "1"},
+        {"id": "2", "status": "todo", "dependsOn": "1", "model": "claude-opus-4-8"},
     ]
     assert [t["id"] for t in oc.promotable_tickets(tasks)] == ["2"]
 
@@ -387,8 +439,8 @@ def test_promotable_string_dep_completed():
 def test_promotable_string_dep_incomplete():
     """dependsOn as a string where the dep is not completed — not promotable."""
     tasks = [
-        {"id": "1", "status": "todo"},
-        {"id": "2", "status": "todo", "dependsOn": "1"},
+        {"id": "1", "status": "todo", "model": "claude-opus-4-8"},
+        {"id": "2", "status": "todo", "dependsOn": "1", "model": "claude-opus-4-8"},
     ]
     assert [t["id"] for t in oc.promotable_tickets(tasks)] == ["1"]
 
@@ -403,7 +455,7 @@ def test_promotable_dep_satisfied_by_done_status():
     """A dependency counts as met when the dep is `done` (not just `completed`)."""
     tasks = [
         {"id": "1", "status": "done"},
-        {"id": "2", "status": "todo", "dependsOn": ["1"]},
+        {"id": "2", "status": "todo", "dependsOn": ["1"], "model": "claude-opus-4-8"},
     ]
     assert [t["id"] for t in oc.promotable_tickets(tasks)] == ["2"]
 
@@ -414,8 +466,8 @@ def test_promotable_deps_resolved_per_board_strict():
     while (A,1) is completed — (B,2) must NOT be promotable."""
     tasks = [
         {"_board": "A", "id": "1", "status": "completed"},
-        {"_board": "B", "id": "1", "status": "todo"},
-        {"_board": "B", "id": "2", "status": "todo", "dependsOn": ["1"]},
+        {"_board": "B", "id": "1", "status": "todo", "model": "claude-opus-4-8"},
+        {"_board": "B", "id": "2", "status": "todo", "dependsOn": ["1"], "model": "claude-opus-4-8"},
     ]
     promo = {(t["_board"], t["id"]) for t in oc.promotable_tickets(tasks)}
     assert ("B", "2") not in promo
@@ -748,6 +800,91 @@ def test_parse_usage_limit_none_for_unrelated_text():
     assert oc.parse_usage_limit(None) is None
 
 
+def test_usage_limit_from_transcript_tail_ignores_echoed_source():
+    """A sub-agent that reads/cats orchestrator_core.py's own source (whose
+    comments and docstrings discuss usage-limit detection) must not trigger a
+    false pause: the phrase only appears inside a "user" tool_result content
+    block, not the CLI's own result/system status."""
+    tool_result_line = json.dumps({
+        "type": "user",
+        "message": {"role": "user", "content": [{
+            "type": "tool_result",
+            "content": "def parse_usage_limit(text):\n    # Claude usage limit reached|123 is the canonical form",
+        }]},
+    })
+    result_line = json.dumps({
+        "type": "result", "subtype": "error_during_execution",
+        "is_error": True, "stop_reason": "tool_use",
+    })
+    tail = tool_result_line + "\n" + result_line
+    assert oc.usage_limit_from_transcript_tail(tail) is None
+
+
+def test_usage_limit_from_transcript_tail_detects_real_result_line():
+    """A genuine usage-limit signal in the CLI's own terminal `result` line is
+    still detected."""
+    tail = json.dumps({
+        "type": "result", "is_error": True,
+        "result": "Claude AI usage limit reached|1719500000",
+    })
+    assert oc.usage_limit_from_transcript_tail(tail) == {"resetAt": 1719500000}
+
+
+def test_usage_limit_from_transcript_tail_detects_plain_stderr():
+    """Non-JSON lines (plain stderr from a non-stream-json invocation) are
+    scanned directly."""
+    tail = "Claude AI usage limit reached|1719500000\n"
+    assert oc.usage_limit_from_transcript_tail(tail) == {"resetAt": 1719500000}
+
+
+def test_parse_usage_limit_session_limit_wording():
+    """CLI ~2.1.x reworded the limit message to "session limit" — it must still
+    be detected (ticket #99 regression: the old regex only matched "usage
+    limit", so the ticket was blocked as a crash instead of parked)."""
+    out = oc.parse_usage_limit(
+        "You've hit your session limit · resets 2:10pm (America/New_York)")
+    assert out == {"resetAt": None}
+
+
+def test_usage_limit_from_transcript_tail_rate_limit_event():
+    """A rejected `rate_limit_event` line is the authoritative structured
+    signal: its `resetsAt` epoch is returned even though the human-readable
+    result text carries no parseable epoch (ticket #99's actual run log)."""
+    tail = "\n".join([
+        json.dumps({
+            "type": "rate_limit_event",
+            "rate_limit_info": {"status": "rejected", "resetsAt": 1783620600,
+                                "rateLimitType": "five_hour"},
+        }),
+        json.dumps({
+            "type": "result", "subtype": "success", "is_error": True,
+            "api_error_status": 429,
+            "result": "You've hit your session limit · resets 2:10pm (America/New_York)",
+        }),
+    ])
+    assert oc.usage_limit_from_transcript_tail(tail) == {"resetAt": 1783620600}
+
+
+def test_usage_limit_from_transcript_tail_allowed_rate_limit_event_ignored():
+    """A `rate_limit_event` whose status is not "rejected" (e.g. an advisory
+    warning while the run continues) must not park dispatch."""
+    tail = json.dumps({
+        "type": "rate_limit_event",
+        "rate_limit_info": {"status": "allowed", "resetsAt": 1783620600},
+    })
+    assert oc.usage_limit_from_transcript_tail(tail) is None
+
+
+def test_usage_limit_from_transcript_tail_result_429_without_phrase():
+    """A terminal `result` line with api_error_status 429 is a limit even if
+    the wording changes again and no known phrase matches."""
+    tail = json.dumps({
+        "type": "result", "is_error": True, "api_error_status": 429,
+        "result": "Some future wording we do not recognise",
+    })
+    assert oc.usage_limit_from_transcript_tail(tail) == {"resetAt": None}
+
+
 def test_usage_pause_set_with_explicit_reset(kanban):
     """Setting a pause with a known future reset epoch parks dispatch until then."""
     oc.set_usage_pause(kanban, reset_at=1000, now_ts=100, reason="ticket 1")
@@ -789,6 +926,80 @@ def test_usage_pause_unset_reads_empty(kanban):
     assert oc.read_usage_pause(kanban) == {}
     assert oc.is_usage_paused(kanban, now_ts=500) is False
     assert oc.usage_pause_remaining(kanban, now_ts=500) == 0
+
+
+# --- Ticket #95: login error detection ---
+
+def test_parse_login_error_not_logged_in():
+    """'Not logged in' in log text is detected as a login error."""
+    assert oc.parse_login_error("Error: Not logged in") is True
+
+
+def test_parse_login_error_please_run_login():
+    """'Please run /login' in log text is detected as a login error."""
+    assert oc.parse_login_error("Please run /login to authenticate") is True
+
+
+def test_parse_login_error_case_insensitive():
+    """Login error detection is case-insensitive."""
+    assert oc.parse_login_error("not logged in") is True
+    assert oc.parse_login_error("PLEASE RUN /LOGIN") is True
+
+
+def test_parse_login_error_in_stream_json():
+    """Login error detected anywhere in a stream-json blob."""
+    blob = '{"type":"result","is_error":true,"result":"Error: Not logged in. Please run /login"}'
+    assert oc.parse_login_error(blob) is True
+
+
+def test_parse_login_error_none_for_unrelated_text():
+    """Ordinary log output is not mistaken for a login error."""
+    assert oc.parse_login_error("Tool ran fine, session done") is False
+    assert oc.parse_login_error("") is False
+    assert oc.parse_login_error(None) is False
+
+
+def test_parse_login_error_none_for_usage_limit():
+    """A usage limit message does not trigger the login error detector."""
+    assert oc.parse_login_error("Claude AI usage limit reached|1719500000") is False
+
+
+def test_login_error_from_transcript_tail_ignores_echoed_source():
+    """A sub-agent that reads/cats orchestrator_core.py's own source (whose
+    _LOGIN_ERROR_RE literal and docstring contain the login phrases) must not
+    be flagged as logged-out: the phrase only appears inside a "user"
+    tool_result content block, not the CLI's own result/system status.
+    Real incident: ticket #104's run, log 104-20260709T134359+0000.log."""
+    tool_result_line = json.dumps({
+        "type": "user",
+        "message": {"role": "user", "content": [{
+            "type": "tool_result",
+            "content": '_LOGIN_ERROR_RE = re.compile(r"not logged in|'
+                       'please run /login", re.IGNORECASE)',
+        }]},
+    })
+    result_line = json.dumps({
+        "type": "result", "subtype": "error_during_execution",
+        "is_error": True, "stop_reason": "tool_use",
+    })
+    tail = tool_result_line + "\n" + result_line
+    assert oc.login_error_from_transcript_tail(tail) is False
+
+
+def test_login_error_from_transcript_tail_detects_real_result_line():
+    """A genuine login error in the CLI's own terminal `result` line is
+    still detected."""
+    tail = json.dumps({
+        "type": "result", "is_error": True,
+        "result": "Not logged in. Please run /login.",
+    })
+    assert oc.login_error_from_transcript_tail(tail) is True
+
+
+def test_login_error_from_transcript_tail_detects_plain_stderr():
+    """Non-JSON lines (plain stderr from a non-stream-json invocation) are
+    scanned directly."""
+    assert oc.login_error_from_transcript_tail("Error: Not logged in\n") is True
 
 
 # --- Agent chat: pure helpers (spec docs/specs/2026-07-03-agent-chat-design.md) ---

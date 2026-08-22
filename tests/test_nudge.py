@@ -54,7 +54,7 @@ def test_nudge_triggers_tick(server, kanban, monkeypatch):
     import orchestrator_core as oc
 
     # Ticket 1 is already in 'todo'; no deps, so a tick should promote it to 'ready'.
-    p = os.path.join(kanban, "demo", "1.json")
+    p = os.path.join(kanban, "boards", "demo", "1.json")
     with open(p, "r", encoding="utf-8") as f:
         t = json.load(f)
     assert t["status"] == "todo"
@@ -113,10 +113,8 @@ def test_nudge_returns_queued_true_when_no_thread(server, monkeypatch):
 
 def test_nudge_button_on_boards_page():
     """The nudge button should appear in the topbar on the boards page."""
-    import pathlib
-    root = pathlib.Path(__file__).parent.parent
-    html_path = root / "kanban.html"
-    js_path = root / "kanban.js"
+    html_path = ks.HTML_PATH
+    js_path = ks.JS_PATH
     with open(html_path, "r", encoding="utf-8") as f:
         html = f.read()
     with open(js_path, "r", encoding="utf-8") as f:
@@ -139,9 +137,7 @@ def test_nudge_button_on_boards_page():
 
 def test_nudge_button_calls_api():
     """The nudge button handler should POST to /api/orchestrator/nudge."""
-    import pathlib
-    js_path = pathlib.Path(__file__).parent.parent / "kanban.js"
-    with open(js_path, "r", encoding="utf-8") as f:
+    with open(ks.JS_PATH, "r", encoding="utf-8") as f:
         js = f.read()
 
     # Extract the nudgeBoardBtn click handler to verify it calls the right endpoint.
@@ -158,3 +154,137 @@ def test_nudge_button_calls_api():
     assert "method:" in handler_code and "POST" in handler_code, (
         "Handler should use POST method"
     )
+
+
+# --- Multiple nudge / serialization tests ------------------------------------
+
+def _reset_nudge_state(monkeypatch):
+    """Reset module-level nudge state between tests."""
+    monkeypatch.setattr(ks, "_nudge_running", False, raising=False)
+    monkeypatch.setattr(ks, "_nudge_queued", False, raising=False)
+
+
+def test_nudge_second_call_while_running_queues_one(monkeypatch):
+    """While a nudge tick is running, a second POST queues exactly one follow-up."""
+    import time as _time
+
+    tick_started = threading.Event()
+    tick_unblock = threading.Event()
+    tick_calls = []
+
+    def slow_tick():
+        tick_calls.append("start")
+        tick_started.set()
+        tick_unblock.wait(timeout=5)
+        tick_calls.append("end")
+
+    _reset_nudge_state(monkeypatch)
+    monkeypatch.setattr(ks, "orch_nudge_tick", slow_tick, raising=False)
+
+    # First nudge: starts the slow tick.
+    ks.orch_nudge()
+    tick_started.wait(timeout=2)
+    assert ks._nudge_running is True
+
+    # Second nudge while running: should queue.
+    result, _ = ks.orch_nudge()
+    assert result.get("ok") is True
+    assert ks._nudge_queued is True
+
+    # Third nudge while running: queue is already full, still just one queued.
+    ks.orch_nudge()
+    assert ks._nudge_queued is True
+
+    # Unblock the first tick and wait for it to drain.
+    tick_unblock.set()
+    _time.sleep(0.3)
+
+    # After the first tick ends, the queued nudge should have fired and cleared.
+    _time.sleep(0.3)
+    assert tick_calls.count("start") == 2, (
+        f"Expected exactly 2 tick runs (one immediate + one queued), got {tick_calls}"
+    )
+    assert ks._nudge_queued is False
+    assert ks._nudge_running is False
+
+
+def test_nudge_no_parallel_ticks(monkeypatch):
+    """Two parallel nudge calls must not run two ticks simultaneously."""
+    import time as _time
+
+    concurrent_peak = [0]
+    running_now = [0]
+    tick_lock = threading.Lock()
+
+    def counting_tick():
+        with tick_lock:
+            running_now[0] += 1
+            concurrent_peak[0] = max(concurrent_peak[0], running_now[0])
+        _time.sleep(0.05)
+        with tick_lock:
+            running_now[0] -= 1
+
+    _reset_nudge_state(monkeypatch)
+    monkeypatch.setattr(ks, "orch_nudge_tick", counting_tick, raising=False)
+
+    # Fire many nudges rapidly.
+    for _ in range(5):
+        ks.orch_nudge()
+        _time.sleep(0.01)
+
+    _time.sleep(0.5)
+    assert concurrent_peak[0] <= 1, (
+        f"Ticks ran in parallel (peak concurrency={concurrent_peak[0]})"
+    )
+
+
+def test_nudge_backlog_capped_at_one(monkeypatch):
+    """Spamming nudge while running should result in at most 2 total tick runs."""
+    import time as _time
+
+    tick_started = threading.Event()
+    tick_unblock = threading.Event()
+    tick_count = [0]
+
+    def slow_tick():
+        tick_count[0] += 1
+        if tick_count[0] == 1:
+            tick_started.set()
+            tick_unblock.wait(timeout=5)
+
+    _reset_nudge_state(monkeypatch)
+    monkeypatch.setattr(ks, "orch_nudge_tick", slow_tick, raising=False)
+
+    ks.orch_nudge()
+    tick_started.wait(timeout=2)
+
+    # Spam 10 nudges while tick 1 is running.
+    for _ in range(10):
+        ks.orch_nudge()
+
+    tick_unblock.set()
+    _time.sleep(0.5)
+
+    assert tick_count[0] <= 2, (
+        f"Backlog should be capped at 1 (max 2 total ticks), got {tick_count[0]}"
+    )
+
+
+def test_nudge_completes_cleanly_when_no_backlog(monkeypatch):
+    """After a tick with no queued follow-up, _nudge_running is False."""
+    import time as _time
+
+    done = threading.Event()
+
+    def fast_tick():
+        done.set()
+
+    _reset_nudge_state(monkeypatch)
+    monkeypatch.setattr(ks, "orch_nudge_tick", fast_tick, raising=False)
+
+    ks.orch_nudge()
+    done.wait(timeout=2)
+    _time.sleep(0.1)
+
+    assert ks._nudge_running is False
+    assert ks._nudge_queued is False

@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import threading
 import http.client
 
@@ -101,10 +102,16 @@ def test_put_state_merges(server):
 # --- Server restart endpoint ---
 
 def test_server_restart_schedules_reexec(server, monkeypatch):
-    calls = {"exec": 0, "stop": 0, "timers": []}
+    calls = {"exec": 0, "spawn": 0, "exit": 0, "stop": 0, "timers": []}
 
+    # Stub every path the re-exec could take so running fn() never actually
+    # replaces/kills the test process, on either platform.
     monkeypatch.setattr(ks.os, "execv",
                         lambda *a: calls.__setitem__("exec", calls["exec"] + 1))
+    monkeypatch.setattr(ks.subprocess, "Popen",
+                        lambda *a, **k: calls.__setitem__("spawn", calls["spawn"] + 1))
+    monkeypatch.setattr(ks.os, "_exit",
+                        lambda *a: calls.__setitem__("exit", calls["exit"] + 1))
     monkeypatch.setattr(ks, "stop_orchestrator",
                         lambda: calls.__setitem__("stop", calls["stop"] + 1))
 
@@ -119,11 +126,17 @@ def test_server_restart_schedules_reexec(server, monkeypatch):
     status, body = _req(server, "POST", "/api/server/restart")
     assert status == 200
     assert body == {"ok": True}
-    assert calls["stop"] == 1            # lock released before exec
+    assert calls["stop"] == 1            # lock released before re-exec
     assert len(calls["timers"]) == 1     # re-exec scheduled on a Timer
     _, fn = calls["timers"][0]
     fn()
-    assert calls["exec"] == 1
+    if sys.platform == "win32":
+        # Windows can't os.execv a spaced interpreter path — spawn + exit instead.
+        assert calls["spawn"] == 1 and calls["exit"] == 1
+        assert calls["exec"] == 0
+    else:
+        assert calls["exec"] == 1
+        assert calls["spawn"] == 0 and calls["exit"] == 0
 
 
 def test_put_state_persists_idle_seconds(server):
@@ -148,7 +161,7 @@ def test_activity_feed(server, kanban):
 
 def test_kill_queues_when_unreachable(server, kanban, monkeypatch):
     # Put an in-flight marker on ticket 1 with a bogus pid.
-    p = os.path.join(kanban, "demo", "1.json")
+    p = os.path.join(kanban, "boards", "demo", "1.json")
     with open(p, "r", encoding="utf-8") as f:
         t = json.load(f)
     t["orchestrator"] = {"state": "dispatched", "pid": 999999, "killRequested": False}
@@ -164,7 +177,7 @@ def test_kill_queues_when_unreachable(server, kanban, monkeypatch):
 
 
 def test_answer_written(server, kanban):
-    p = os.path.join(kanban, "demo", "1.json")
+    p = os.path.join(kanban, "boards", "demo", "1.json")
     with open(p, "r", encoding="utf-8") as f:
         t = json.load(f)
     t["status"] = "blocked"
@@ -192,7 +205,7 @@ def test_answer_preserves_comments_and_no_tmp_lingering(server, kanban):
     orchestrator.question field, comments survive.  If it reads once at
     request start and clobbers, comments may be lost and a .tmp may linger.
     """
-    p = os.path.join(kanban, "demo", "1.json")
+    p = os.path.join(kanban, "boards", "demo", "1.json")
     with open(p, "r", encoding="utf-8") as f:
         t = json.load(f)
     t["status"] = "blocked"
@@ -241,7 +254,7 @@ def test_direct_kill_does_not_rewrite_file(server, kanban, monkeypatch):
     import orchestrator as orch
     import time as _time
 
-    p = os.path.join(kanban, "demo", "1.json")
+    p = os.path.join(kanban, "boards", "demo", "1.json")
     with open(p, "r", encoding="utf-8") as f:
         t = json.load(f)
     t["orchestrator"] = {"state": "dispatched", "pid": 54321, "killRequested": False}

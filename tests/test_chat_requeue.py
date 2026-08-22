@@ -19,7 +19,7 @@ def _read(path):
 
 
 def _set_dispatched(kanban, ticket_id, pid):
-    p = os.path.join(kanban, "demo", f"{ticket_id}.json")
+    p = os.path.join(kanban, "boards", "demo", f"{ticket_id}.json")
     t = _read(p)
     t["status"] = "in_progress"
     t["orchestrator"] = {
@@ -231,7 +231,7 @@ def test_stop_all_preserves_pending_chat(kanban, monkeypatch):
 
 def test_build_agent_prompt_injects_pending_chat(kanban):
     task = {"id": "1", "title": "First", "status": "ready",
-            "_path": os.path.join(kanban, "demo", "1.json"), "_board": "demo",
+            "_path": os.path.join(kanban, "boards", "demo", "1.json"), "_board": "demo",
             "pendingChat": [{"message": "use the py launcher", "writer": "ryan",
                              "ts": "2026-08-03T12:00:00+00:00"}]}
     prompt = orch._build_agent_prompt(task, {"name": "p", "systemPrompt": "sys"})
@@ -241,7 +241,7 @@ def test_build_agent_prompt_injects_pending_chat(kanban):
 
 def test_build_resume_prompt_injects_pending_chat(kanban):
     task = {"id": "1", "title": "First", "status": "blocked",
-            "_path": os.path.join(kanban, "demo", "1.json"), "_board": "demo",
+            "_path": os.path.join(kanban, "boards", "demo", "1.json"), "_board": "demo",
             "orchestrator": {"question": {"prompt": "q?",
                                           "answer": {"value": "v", "notes": ""}}},
             "pendingChat": [{"message": "prefer approach B", "writer": "ryan",
@@ -253,13 +253,13 @@ def test_build_resume_prompt_injects_pending_chat(kanban):
 
 def test_build_agent_prompt_without_pending_chat_unchanged(kanban):
     task = {"id": "1", "title": "First", "status": "ready",
-            "_path": os.path.join(kanban, "demo", "1.json"), "_board": "demo"}
+            "_path": os.path.join(kanban, "boards", "demo", "1.json"), "_board": "demo"}
     prompt = orch._build_agent_prompt(task, {"name": "p", "systemPrompt": "sys"})
     assert "User guidance received mid-run" not in prompt
 
 
 def test_dispatch_consumes_pending_chat(kanban, monkeypatch):
-    p = os.path.join(kanban, "demo", "1.json")
+    p = os.path.join(kanban, "boards", "demo", "1.json")
     t = _read(p)
     t["status"] = "ready"
     t["pendingChat"] = [{"message": "queued guidance", "writer": "ryan",

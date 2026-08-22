@@ -51,7 +51,7 @@ def _capture_popen(monkeypatch):
 
 def _task(kanban):
     return {"id": "1", "title": "x", "detail": "", "_board": "demo",
-            "_path": os.path.join(kanban, "demo", "1.json")}
+            "_path": os.path.join(kanban, "boards", "demo", "1.json")}
 
 
 def _first_stdin_text(proc):
